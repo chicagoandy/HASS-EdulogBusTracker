@@ -12,9 +12,14 @@ student and trip API responses are not exposed.
 
 ## Installation
 
-Copy `custom_components/edulog_bus_tracker` into the Home Assistant
-`custom_components` directory, restart Home Assistant, then add **Edulog Bus
-Tracker** from **Settings > Devices & services > Add integration**.
+Install **Edulog Bus Tracker** through HACS, or copy
+`custom_components/edulog_bus_tracker` into the Home Assistant
+`custom_components` directory manually. Restart Home Assistant, then add
+**Edulog Bus Tracker** from **Settings > Devices & services > Add integration**.
+
+To install through HACS before it is listed in the default store, go to
+**HACS > Integrations > menu > Custom repositories**, add
+`https://github.com/chicagoandy/HASSEdulogBusTracker`, and choose **Integration**.
 
 Sign in with the Edulog Parent Portal email and password. They are used only to
 request an access token and are not saved. Home Assistant stores only the access
@@ -56,15 +61,24 @@ cookies, student identifiers, or live location data in issues or logs. If a
 token has been exposed, sign out and revoke the session through Edulog or your
 school district if possible.
 
+## License
+
+This project is distributed under the GNU General Public License v3.0 or later.
+See [LICENSE](./LICENSE) for the full text.
+
 ## Project structure
 
 ```text
 custom_components/edulog_bus_tracker/
   api.py
+  binary_sensor.py
   config_flow.py
   coordinator.py
   device_tracker.py
   manifest.json
   strings.json
+hacs.json
+LICENSE
+.github/workflows/validate.yml
 tests/
 ```
