@@ -5,14 +5,22 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Mapping
+from datetime import date, datetime, time, timedelta, tzinfo
 from typing import Any
 
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryAuthFailed
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
+from homeassistant.util import dt as dt_util
 
 from .api import EdulogApi, EdulogAuthError
-from .const import DOMAIN, SCAN_INTERVAL
+from .const import (
+    DOMAIN,
+    IDLE_VEHICLE_REFRESH_INTERVAL,
+    SCAN_INTERVAL,
+    STUDENT_LIST_REFRESH_INTERVAL,
+    TRIP_SCHEDULE_REFRESH_INTERVAL,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -28,6 +36,15 @@ class EdulogCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
             update_interval=SCAN_INTERVAL,
         )
         self.api = api
+        self._student_records: list[dict[str, Any]] | None = None
+        self._last_student_refresh: datetime | None = None
+        self._trip_lookups: list[dict[str, Any]] | None = None
+        self._last_trip_refresh: datetime | None = None
+        self._last_trip_requests: list[dict[str, str]] | None = None
+        self._vehicle_locations: dict[
+            tuple[str, str], dict[str, Any] | None
+        ] = {}
+        self._last_vehicle_refresh: dict[tuple[str, str], datetime] = {}
 
     async def _async_update_data(self) -> dict[str, dict[str, Any]]:
         """Retrieve approved students, their trips, and latest bus positions."""
@@ -43,8 +60,15 @@ class EdulogCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
         if self.api.user_id is None:
             raise EdulogAuthError("Edulog account ID is missing.")
 
-        student_records = await self.api.async_get_students()
-        approved_students: dict[str, dict[str, str]] = {}
+        now = dt_util.now()
+        if _refresh_due(
+            self._last_student_refresh, now, STUDENT_LIST_REFRESH_INTERVAL
+        ):
+            self._student_records = await self.api.async_get_students()
+            self._last_student_refresh = now
+
+        student_records = self._student_records or []
+        approved_students: dict[str, dict[str, Any]] = {}
         trip_requests: list[dict[str, str]] = []
         for record in student_records:
             if str(record.get("status", "")).strip().lower() != "approved":
@@ -54,24 +78,38 @@ class EdulogCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
             if not student_id or not tenant_id:
                 _LOGGER.warning("Skipping an approved student with incomplete identifiers")
                 continue
-            full_name = " ".join(
-                part
-                for part in (
-                    _string(record.get("firstName")),
-                    _string(record.get("lastName")),
-                )
-                if part
-            )
+            first_name = _string(_field(record, "firstName"))
+            last_name = _string(_field(record, "lastName"))
+            full_name = " ".join(part for part in (first_name, last_name) if part)
             approved_students[student_id] = {
                 "name": full_name or _string(record.get("name")) or "Edulog student",
                 "tenant_id": tenant_id,
+                "student_first_name": first_name,
+                "student_last_name": last_name,
             }
             trip_requests.append({"studentId": student_id, "tenantId": tenant_id})
 
         if not trip_requests:
+            self._trip_lookups = []
+            self._last_trip_requests = []
+            self._last_trip_refresh = now
             return {}
 
-        trip_lookups = await self.api.async_get_trips(trip_requests)
+        refresh_trip_schedule = (
+            _refresh_due(
+                self._last_trip_refresh,
+                now,
+                TRIP_SCHEDULE_REFRESH_INTERVAL,
+            )
+            or trip_requests != self._last_trip_requests
+        )
+        if refresh_trip_schedule:
+            self._trip_lookups = await self.api.async_get_trips(trip_requests)
+            self._last_trip_refresh = now
+            self._last_trip_requests = trip_requests
+
+        trip_lookups = self._trip_lookups or []
+        has_active_trip = _has_active_trip(trip_lookups, now)
         student_ids = [request["studentId"] for request in trip_requests]
         trackers: dict[str, dict[str, Any]] = {}
         requests_by_vehicle: dict[tuple[str, str], list[str]] = {}
@@ -87,6 +125,13 @@ class EdulogCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
                 "tenant_id": student["tenant_id"],
                 "vehicle_id": None,
                 "location": None,
+                "trip_type": None,
+                "pickup_stop_name": None,
+                "pickup_time": None,
+                "dropoff_stop_name": None,
+                "dropoff_time": None,
+                "student_first_name": student["student_first_name"],
+                "student_last_name": student["student_last_name"],
             }
 
         for index, lookup in enumerate(trip_lookups):
@@ -145,6 +190,13 @@ class EdulogCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
                     "tenant_id": approved_students[student_id]["tenant_id"],
                     "vehicle_id": vehicle_id,
                     "location": None,
+                    **_trip_attributes(trip),
+                    "student_first_name": approved_students[student_id][
+                        "student_first_name"
+                    ],
+                    "student_last_name": approved_students[student_id][
+                        "student_last_name"
+                    ],
                 }
                 if vehicle_id:
                     key = (vehicle_id, approved_students[student_id]["tenant_id"])
@@ -162,16 +214,33 @@ class EdulogCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
             async with semaphore:
                 return await self.api.async_get_vehicle_location(vehicle_id, tenant_id)
 
+        vehicle_interval = (
+            SCAN_INTERVAL if has_active_trip else IDLE_VEHICLE_REFRESH_INTERVAL
+        )
+        vehicles_to_refresh = [
+            vehicle
+            for vehicle in requests_by_vehicle
+            if _refresh_due(
+                self._last_vehicle_refresh.get(vehicle),
+                now,
+                vehicle_interval,
+            )
+        ]
         vehicle_locations = await asyncio.gather(
             *(
                 fetch_location(vehicle_id, tenant_id)
-                for vehicle_id, tenant_id in requests_by_vehicle
+                for vehicle_id, tenant_id in vehicles_to_refresh
             )
         )
-        for (vehicle_id, tenant_id), location in zip(
-            requests_by_vehicle, vehicle_locations, strict=True
+        for vehicle, location in zip(
+            vehicles_to_refresh, vehicle_locations, strict=True
         ):
-            for tracker_id in requests_by_vehicle[(vehicle_id, tenant_id)]:
+            self._vehicle_locations[vehicle] = location
+            self._last_vehicle_refresh[vehicle] = now
+
+        for vehicle, tracker_ids in requests_by_vehicle.items():
+            location = self._vehicle_locations.get(vehicle)
+            for tracker_id in tracker_ids:
                 trackers[tracker_id]["location"] = location
 
         return trackers
@@ -182,3 +251,134 @@ def _string(value: Any) -> str | None:
         return None
     text = str(value).strip()
     return text or None
+
+
+def _refresh_due(last_refresh: datetime | None, now: datetime, interval: timedelta) -> bool:
+    return last_refresh is None or now - last_refresh >= interval
+
+
+def _field(record: Mapping[str, Any], name: str) -> Any:
+    """Return a field by name without depending on API capitalization."""
+    normalized_name = name.casefold()
+    return next(
+        (value for key, value in record.items() if key.casefold() == normalized_name),
+        None,
+    )
+
+
+def _trip_attributes(trip: Mapping[str, Any]) -> dict[str, Any]:
+    """Select the configured trip details without exposing the full API record."""
+    return {
+        "trip_type": _string(_field(trip, "type")),
+        "pickup_stop_name": _nested_field(trip, ("pickup", "stopName")),
+        "pickup_time": _nested_field(trip, ("pickup", "time")),
+        "dropoff_stop_name": _nested_field(trip, ("dropoff", "stopName")),
+        "dropoff_time": _nested_field(trip, ("dropoff", "time")),
+    }
+
+
+def _nested_field(record: Mapping[str, Any], path: tuple[str, ...]) -> Any:
+    value: Any = record
+    for part in path:
+        if not isinstance(value, Mapping):
+            return None
+        value = _field(value, part)
+    return value if isinstance(value, (str, int, float, bool)) else None
+
+
+def _has_active_trip(
+    trip_lookups: list[dict[str, Any]], now: datetime
+) -> bool:
+    """Return whether any cached trip is between its pickup and dropoff times."""
+    for lookup in trip_lookups:
+        trips = _field(lookup, "trips")
+        if isinstance(trips, list) and any(
+            isinstance(trip, Mapping) and _trip_is_active(trip, now)
+            for trip in trips
+        ):
+            return True
+    return False
+
+
+def _trip_is_active(trip: Mapping[str, Any], now: datetime) -> bool:
+    """Compare a trip's local pickup/dropoff schedule with the current time."""
+    timezone = now.tzinfo
+    if timezone is None:
+        return False
+    pickup_value = _nested_field(trip, ("pickup", "time"))
+    dropoff_value = _nested_field(trip, ("dropoff", "time"))
+    pickup = _parse_schedule_value(pickup_value, timezone, now)
+    dropoff = _parse_schedule_value(dropoff_value, timezone, now)
+    if pickup is None or dropoff is None:
+        return False
+
+    if isinstance(pickup, datetime) and isinstance(dropoff, datetime):
+        return pickup <= now < dropoff
+
+    if isinstance(pickup, datetime):
+        dropoff_datetime = _combine_schedule_time(pickup.date(), dropoff, timezone)
+        if dropoff_datetime <= pickup:
+            dropoff_datetime += timedelta(days=1)
+        return pickup <= now < dropoff_datetime
+
+    if isinstance(dropoff, datetime):
+        pickup_datetime = _combine_schedule_time(dropoff.date(), pickup, timezone)
+        if pickup_datetime >= dropoff:
+            pickup_datetime -= timedelta(days=1)
+        return pickup_datetime <= now < dropoff
+
+    for day_offset in (-1, 0):
+        pickup_datetime = _combine_schedule_time(
+            now.date() + timedelta(days=day_offset), pickup, timezone
+        )
+        dropoff_datetime = _combine_schedule_time(
+            pickup_datetime.date(), dropoff, timezone
+        )
+        if dropoff_datetime <= pickup_datetime:
+            dropoff_datetime += timedelta(days=1)
+        if pickup_datetime <= now < dropoff_datetime:
+            return True
+    return False
+
+
+def _parse_schedule_value(
+    value: Any, timezone: tzinfo, now: datetime
+) -> datetime | time | None:
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    if not text:
+        return None
+
+    try:
+        parsed_datetime = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        parsed_datetime = None
+    if parsed_datetime is not None:
+        if parsed_datetime.tzinfo is None:
+            return parsed_datetime.replace(tzinfo=timezone)
+        return parsed_datetime.astimezone(timezone)
+
+    try:
+        parsed_time = time.fromisoformat(text)
+    except ValueError:
+        for time_format in ("%I:%M %p", "%I:%M:%S %p"):
+            try:
+                parsed_time = datetime.strptime(text, time_format).time()
+                break
+            except ValueError:
+                continue
+        else:
+            return None
+
+    if parsed_time.tzinfo is not None:
+        return datetime.combine(now.date(), parsed_time).astimezone(timezone)
+    return parsed_time
+
+
+def _combine_schedule_time(
+    day: date, schedule_time: datetime | time, timezone: tzinfo
+) -> datetime:
+    if isinstance(schedule_time, datetime):
+        return datetime.combine(day, schedule_time.timetz()).astimezone(timezone)
+    return datetime.combine(day, schedule_time, tzinfo=timezone)

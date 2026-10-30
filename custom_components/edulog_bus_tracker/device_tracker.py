@@ -53,11 +53,11 @@ class EdulogStudentTracker(CoordinatorEntity[EdulogCoordinator], TrackerEntity):
         super().__init__(coordinator)
         trip = coordinator.data[tracker_id]
         self.tracker_id = tracker_id
-        self._attr_name = f"{trip['name']} - {trip['trip_name']}"
+        self._attr_name = trip["trip_name"]
         self._attr_unique_id = f"{entry.entry_id}_{tracker_id}"
         self._attr_device_info = DeviceInfo(
             identifiers={(DOMAIN, self._attr_unique_id)},
-            name=self._attr_name,
+            name=f"{trip['name']} - {trip['trip_name']}",
             manufacturer="Edulog",
             model="Student trip bus location",
         )
@@ -88,16 +88,22 @@ class EdulogStudentTracker(CoordinatorEntity[EdulogCoordinator], TrackerEntity):
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
-        """Expose vehicle details without including student identifiers."""
+        """Expose selected student, trip, and vehicle details."""
         location = self._location
-        if not location:
-            return {
-                "trip": self._trip.get("trip_name"),
-                "vehicle_id": self._trip.get("vehicle_id"),
-            }
-        return {
+        attributes = {
             "trip": self._trip.get("trip_name"),
-            "vehicle_id": location.get("vehicleId"),
-            "heading": location.get("heading"),
-            "speed": location.get("speed"),
+            "vehicle_id": (
+                location.get("vehicleId") if location else self._trip.get("vehicle_id")
+            ),
+            "student_first_name": self._trip.get("student_first_name"),
+            "student_last_name": self._trip.get("student_last_name"),
+            "trip_type": self._trip.get("trip_type"),
+            "pickup_stop_name": self._trip.get("pickup_stop_name"),
+            "pickup_time": self._trip.get("pickup_time"),
+            "dropoff_stop_name": self._trip.get("dropoff_stop_name"),
+            "dropoff_time": self._trip.get("dropoff_time"),
         }
+        if location:
+            attributes["heading"] = location.get("heading")
+            attributes["speed"] = location.get("speed")
+        return attributes

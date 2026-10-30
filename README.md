@@ -3,6 +3,12 @@
 A Home Assistant custom integration that creates a device tracker for each
 trip returned for an approved student in an Edulog Parent Portal account. Each
 tracker reports the live location of that trip's assigned vehicle.
+Entity names combine the student and trip names once (for example,
+`Elliana Metcalfe - Trip 1`).
+Tracker attributes include `student_first_name`, `student_last_name`,
+`trip_type`, `pickup_stop_name`, `pickup_time`, `dropoff_stop_name`, and
+`dropoff_time`, along with available vehicle details. Other fields from the
+student and trip API responses are not exposed.
 
 ## Installation
 
@@ -17,10 +23,13 @@ Assistant starts and is not stored separately. If the access token expires, the
 integration asks you to sign in again; replacement credentials are also used
 only for that sign-in and are not stored.
 
-The integration polls the portal every 60 seconds. It gets approved student
-access requests, looks up their trips, and polls the live-vehicle endpoint for
-each assigned bus. A student with no returned trips gets a placeholder tracker;
-trips without an assigned vehicle remain as trackers with no location.
+The integration checks for active trip windows every 5 seconds. While a trip is
+active, it refreshes vehicle locations every 5 seconds. Approved student access
+requests refresh daily, and inactive vehicle locations refresh every 60 seconds.
+Trip schedules refresh at startup and hourly, regardless of whether a trip is
+active. Trip times are interpreted in Home Assistant's configured local
+timezone. A student with no returned trips gets a placeholder tracker; trips
+without an assigned vehicle remain as trackers with no location.
 
 ## API behavior
 
