@@ -3,7 +3,7 @@
     "step": {
       "user": {
         "title": "Connect to Edulog",
-        "description": "Use your Edulog Parent Portal email and password to obtain an access token. Only the access token and account ID are saved; the email and password are used only for this sign-in.",
+        "description": "Use your Edulog Parent Portal email and password to obtain an access token. Only the access token is saved; the email and password are used only for this sign-in.",
         "data": {
           "username": "Email",
           "password": "Password"
