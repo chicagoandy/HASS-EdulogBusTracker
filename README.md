@@ -23,13 +23,28 @@ Assistant starts and is not stored separately. If the access token expires, the
 integration asks you to sign in again; replacement credentials are also used
 only for that sign-in and are not stored.
 
-The integration checks for active trip windows every 5 seconds. While a trip is
-active, it refreshes vehicle locations every 5 seconds. Approved student access
-requests refresh daily, and inactive vehicle locations refresh every 60 seconds.
-Trip schedules refresh at startup and hourly, regardless of whether a trip is
-active. Trip times are interpreted in Home Assistant's configured local
-timezone. A student with no returned trips gets a placeholder tracker; trips
-without an assigned vehicle remain as trackers with no location.
+Home Assistant checks the integration for updates every 5 seconds; this is not
+the interval for every API request. On each check, it evaluates active trip
+windows using the cached trip schedules. Vehicle locations are refreshed every
+5 seconds for vehicles tied to an active trip, and every 60 seconds for other
+assigned vehicles. The approved student list is fetched at startup and
+refreshed daily. Trip schedules are fetched at startup and refreshed hourly,
+or sooner if the approved student list changes. Thus, student and trip
+endpoints are not called every 5 seconds. Trip times are interpreted in Home
+Assistant's configured local timezone. A student with no returned trips gets
+a placeholder tracker; trips without an assigned vehicle remain as trackers
+with no location.
+Each trip also has a **Location polling** binary sensor. It is on when that
+trip has an assigned vehicle and is within its scheduled pickup-to-dropoff
+window, indicating that its vehicle location is polled every 5 seconds; it is
+off outside that window, when that vehicle's location is polled every 60
+seconds, or when the trip has no assigned vehicle. Each vehicle's cadence is
+independent; if multiple trips share a vehicle, it is polled every 5 seconds
+whenever any associated trip is active.
+
+If the Edulog access token expires, Home Assistant creates a repair issue
+asking you to reauthenticate the integration. The issue is cleared after a
+successful sign-in.
 
 ## API behavior
 

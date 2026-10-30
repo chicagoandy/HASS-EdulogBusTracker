@@ -10,6 +10,7 @@ from typing import Any
 
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryAuthFailed
+from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 from homeassistant.util import dt as dt_util
 
@@ -17,6 +18,7 @@ from .api import EdulogApi, EdulogAuthError
 from .const import (
     DOMAIN,
     IDLE_VEHICLE_REFRESH_INTERVAL,
+    REAUTH_ISSUE_ID_PREFIX,
     SCAN_INTERVAL,
     STUDENT_LIST_REFRESH_INTERVAL,
     TRIP_SCHEDULE_REFRESH_INTERVAL,
@@ -28,7 +30,9 @@ _LOGGER = logging.getLogger(__name__)
 class EdulogCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
     """Fetch student assignments and their associated live vehicle locations."""
 
-    def __init__(self, hass: HomeAssistant, api: EdulogApi) -> None:
+    def __init__(
+        self, hass: HomeAssistant, api: EdulogApi, config_entry_id: str
+    ) -> None:
         super().__init__(
             hass,
             _LOGGER,
@@ -36,6 +40,7 @@ class EdulogCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
             update_interval=SCAN_INTERVAL,
         )
         self.api = api
+        self.config_entry_id = config_entry_id
         self._student_records: list[dict[str, Any]] | None = None
         self._last_student_refresh: datetime | None = None
         self._trip_lookups: list[dict[str, Any]] | None = None
@@ -51,6 +56,15 @@ class EdulogCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
         try:
             return await self._async_fetch_data()
         except EdulogAuthError as err:
+            ir.async_create_issue(
+                self.hass,
+                DOMAIN,
+                f"{REAUTH_ISSUE_ID_PREFIX}_{self.config_entry_id}",
+                is_fixable=False,
+                severity=ir.IssueSeverity.ERROR,
+                translation_key="reauthenticate",
+                config_entry_id=self.config_entry_id,
+            )
             raise ConfigEntryAuthFailed(
                 "Edulog access token expired; sign in again."
             ) from err
@@ -109,7 +123,6 @@ class EdulogCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
             self._last_trip_requests = trip_requests
 
         trip_lookups = self._trip_lookups or []
-        has_active_trip = _has_active_trip(trip_lookups, now)
         student_ids = [request["studentId"] for request in trip_requests]
         trackers: dict[str, dict[str, Any]] = {}
         requests_by_vehicle: dict[tuple[str, str], list[str]] = {}
@@ -125,6 +138,7 @@ class EdulogCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
                 "tenant_id": student["tenant_id"],
                 "vehicle_id": None,
                 "location": None,
+                "polling_active": False,
                 "trip_type": None,
                 "pickup_stop_name": None,
                 "pickup_time": None,
@@ -190,6 +204,8 @@ class EdulogCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
                     "tenant_id": approved_students[student_id]["tenant_id"],
                     "vehicle_id": vehicle_id,
                     "location": None,
+                    "polling_active": bool(vehicle_id)
+                    and _trip_is_active(trip, now),
                     **_trip_attributes(trip),
                     "student_first_name": approved_students[student_id][
                         "student_first_name"
@@ -214,16 +230,20 @@ class EdulogCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
             async with semaphore:
                 return await self.api.async_get_vehicle_location(vehicle_id, tenant_id)
 
-        vehicle_interval = (
-            SCAN_INTERVAL if has_active_trip else IDLE_VEHICLE_REFRESH_INTERVAL
-        )
         vehicles_to_refresh = [
             vehicle
             for vehicle in requests_by_vehicle
             if _refresh_due(
                 self._last_vehicle_refresh.get(vehicle),
                 now,
-                vehicle_interval,
+                (
+                    SCAN_INTERVAL
+                    if any(
+                        trackers[tracker_id]["polling_active"]
+                        for tracker_id in requests_by_vehicle[vehicle]
+                    )
+                    else IDLE_VEHICLE_REFRESH_INTERVAL
+                ),
             )
         ]
         vehicle_locations = await asyncio.gather(
@@ -284,20 +304,6 @@ def _nested_field(record: Mapping[str, Any], path: tuple[str, ...]) -> Any:
             return None
         value = _field(value, part)
     return value if isinstance(value, (str, int, float, bool)) else None
-
-
-def _has_active_trip(
-    trip_lookups: list[dict[str, Any]], now: datetime
-) -> bool:
-    """Return whether any cached trip is between its pickup and dropoff times."""
-    for lookup in trip_lookups:
-        trips = _field(lookup, "trips")
-        if isinstance(trips, list) and any(
-            isinstance(trip, Mapping) and _trip_is_active(trip, now)
-            for trip in trips
-        ):
-            return True
-    return False
 
 
 def _trip_is_active(trip: Mapping[str, Any], now: datetime) -> bool:

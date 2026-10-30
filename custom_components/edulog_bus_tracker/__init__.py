@@ -13,7 +13,7 @@ from .api import EdulogApi, EdulogHttpError
 from .const import DOMAIN
 from .coordinator import EdulogCoordinator
 
-PLATFORMS = [Platform.DEVICE_TRACKER]
+PLATFORMS = [Platform.BINARY_SENSOR, Platform.DEVICE_TRACKER]
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
@@ -22,7 +22,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         async_get_clientsession(hass),
         entry.data.get("auth_token"),
     )
-    coordinator = EdulogCoordinator(hass, api)
+    coordinator = EdulogCoordinator(hass, api, entry.entry_id)
     try:
         await coordinator.async_config_entry_first_refresh()
     except ConfigEntryAuthFailed:

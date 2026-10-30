@@ -28,5 +28,11 @@
       "reauth_successful": "Edulog sign-in was successful.",
       "reauth_entry_not_found": "The Edulog configuration entry could not be found."
     }
+  },
+  "issues": {
+    "reauthenticate": {
+      "title": "Edulog sign-in required",
+      "description": "The Edulog access token has expired. Reauthenticate the Edulog Bus Tracker integration from Settings > Devices & services to restore bus updates."
+    }
   }
 }

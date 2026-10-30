@@ -10,10 +10,11 @@ from homeassistant import config_entries
 from homeassistant.const import CONF_PASSWORD, CONF_USERNAME
 from homeassistant.core import HomeAssistant
 from homeassistant.data_entry_flow import FlowResult
+from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .api import EdulogApi, EdulogAuthError, EdulogHttpError
-from .const import DOMAIN
+from .const import DOMAIN, REAUTH_ISSUE_ID_PREFIX
 
 
 async def _get_auth_token(
@@ -104,6 +105,11 @@ class EdulogConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     self.hass.config_entries.async_update_entry(
                         self._reauth_entry,
                         data={"auth_token": access_token},
+                    )
+                    ir.async_delete_issue(
+                        self.hass,
+                        DOMAIN,
+                        f"{REAUTH_ISSUE_ID_PREFIX}_{self._reauth_entry.entry_id}",
                     )
                     await self.hass.config_entries.async_reload(
                         self._reauth_entry.entry_id
