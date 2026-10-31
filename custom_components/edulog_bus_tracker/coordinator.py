@@ -93,7 +93,7 @@ class EdulogCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
         if student_list_refreshed:
             self._student_records = await self.api.async_get_students()
             self._last_student_refresh = now
-            _LOGGER.debug(
+            _LOGGER.info(
                 "Fetched %d student access requests",
                 len(self._student_records),
             )
@@ -161,14 +161,14 @@ class EdulogCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
             or trip_requests != self._last_trip_requests
         )
         if refresh_trip_schedule:
-            _LOGGER.debug(
+            _LOGGER.info(
                 "Requesting trip schedules for %d approved students",
                 len(trip_requests),
             )
             self._trip_lookups = await self.api.async_get_trips(trip_requests)
             self._last_trip_refresh = now
             self._last_trip_requests = trip_requests
-            _LOGGER.debug(
+            _LOGGER.info(
                 "Received %d trip schedule records",
                 len(self._trip_lookups),
             )
@@ -301,7 +301,7 @@ class EdulogCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
                     len(approved_students),
                 )
             else:
-                _LOGGER.debug(
+                _LOGGER.info(
                     "Prepared %d trip trackers for %d approved students",
                     len(trackers),
                     len(approved_students),
