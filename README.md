@@ -1,9 +1,10 @@
 # HASSEdulogBusTracker
 
-A Home Assistant custom integration that creates a device tracker for each
-trip returned for an approved student in an Edulog Parent Portal account. Each
-tracker reports the live location of that trip's assigned vehicle.
-Entity names combine the student and trip names once (for example,
+A Home Assistant custom integration that creates one Home Assistant device for
+each approved student in an Edulog Parent Portal account. The student's device
+contains a device tracker for each returned trip, reporting the live location
+of its assigned vehicle, and a **Location polling** binary sensor for each
+trip. Entity names combine the student and trip names (for example,
 `Elliana Metcalfe - Trip 1`).
 Tracker attributes include `student_first_name`, `student_last_name`,
 `trip_type`, `pickup_stop_name`, `pickup_time`, `dropoff_stop_name`, and

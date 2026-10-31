@@ -56,10 +56,10 @@ class EdulogStudentTracker(CoordinatorEntity[EdulogCoordinator], TrackerEntity):
         self._attr_name = trip["trip_name"]
         self._attr_unique_id = f"{entry.entry_id}_{tracker_id}"
         self._attr_device_info = DeviceInfo(
-            identifiers={(DOMAIN, self._attr_unique_id)},
-            name=f"{trip['name']} - {trip['trip_name']}",
+            identifiers={(DOMAIN, f"{entry.entry_id}_{trip['student_id']}")},
+            name=trip["name"],
             manufacturer="Edulog",
-            model="Student trip bus location",
+            model="Student bus tracking",
         )
 
     @property

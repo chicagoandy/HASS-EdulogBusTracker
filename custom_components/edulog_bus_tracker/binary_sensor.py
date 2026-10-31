@@ -54,10 +54,10 @@ class EdulogTripPollingSensor(CoordinatorEntity[EdulogCoordinator], BinarySensor
         self.tracker_id = tracker_id
         self._attr_unique_id = f"{entry.entry_id}_{tracker_id}_location_polling"
         self._attr_device_info = DeviceInfo(
-            identifiers={(DOMAIN, f"{entry.entry_id}_{tracker_id}")},
-            name=f"{trip['name']} - {trip['trip_name']}",
+            identifiers={(DOMAIN, f"{entry.entry_id}_{trip['student_id']}")},
+            name=trip["name"],
             manufacturer="Edulog",
-            model="Student trip bus location",
+            model="Student bus tracking",
         )
 
     @property
