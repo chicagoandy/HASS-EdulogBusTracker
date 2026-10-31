@@ -21,12 +21,16 @@ To install through HACS before it is listed in the default store, go to
 **HACS > Integrations > menu > Custom repositories**, add
 `https://github.com/chicagoandy/HASSEdulogBusTracker`, and choose **Integration**.
 
+## Setup
+
 Sign in with the Edulog Parent Portal email and password. They are used only to
 request an access token and are not saved. Home Assistant stores only the access
 token in the config entry. The account ID is read from the token when Home
 Assistant starts and is not stored separately. If the access token expires, the
 integration asks you to sign in again; replacement credentials are also used
 only for that sign-in and are not stored.
+
+## Polling and behavior
 
 Home Assistant checks the integration for updates every 5 seconds; this is not
 the interval for every API request. On each check, it evaluates active trip
