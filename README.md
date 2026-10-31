@@ -59,10 +59,11 @@ after that time.
 
 ## Troubleshooting logs
 
-The integration logs warnings when no approved students with usable IDs are
-available, when trip schedule data is missing or does not match approved
-students, and when no assigned trips are returned. To see successful request
-counts and other diagnostic details, enable debug logging for
+The integration logs warnings when the student API returns no approved
+requests, approved requests are missing required IDs, trip schedule data is
+missing or does not match approved students, or no assigned trips are returned.
+To see successful request counts and other diagnostic details, enable debug
+logging for
 `custom_components.edulog_bus_tracker` in Home Assistant's `configuration.yaml`:
 
 ```yaml

@@ -101,34 +101,52 @@ class EdulogCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
         student_records = self._student_records or []
         approved_students: dict[str, dict[str, Any]] = {}
         trip_requests: list[dict[str, str]] = []
+        approved_record_count = 0
+        incomplete_identifier_count = 0
         for record in student_records:
-            if str(record.get("status", "")).strip().lower() != "approved":
+            if str(_field(record, "status") or "").strip().lower() != "approved":
                 continue
-            student_id = _string(record.get("studentId"))
-            tenant_id = _string(record.get("tenantId"))
+            approved_record_count += 1
+            student_id = _string(_field(record, "studentId"))
+            tenant_id = _string(_field(record, "tenantId"))
             if not student_id or not tenant_id:
-                if student_list_refreshed:
-                    _LOGGER.warning(
-                        "Skipping an approved student with incomplete identifiers"
-                    )
+                incomplete_identifier_count += 1
                 continue
             first_name = _string(_field(record, "firstName"))
             last_name = _string(_field(record, "lastName"))
             full_name = " ".join(part for part in (first_name, last_name) if part)
             approved_students[student_id] = {
-                "name": full_name or _string(record.get("name")) or "Edulog student",
+                "name": full_name
+                or _string(_field(record, "name"))
+                or "Edulog student",
                 "tenant_id": tenant_id,
                 "student_first_name": first_name,
                 "student_last_name": last_name,
             }
             trip_requests.append({"studentId": student_id, "tenantId": tenant_id})
 
+        if student_list_refreshed and incomplete_identifier_count:
+            _LOGGER.warning(
+                "%d approved student access request(s) lacked a student ID or "
+                "tenant ID and were skipped",
+                incomplete_identifier_count,
+            )
+
         if not trip_requests:
             if student_list_refreshed:
-                _LOGGER.warning(
-                    "No approved students with complete identifiers were found; "
-                    "skipping the trip schedule request"
-                )
+                if approved_record_count:
+                    _LOGGER.warning(
+                        "%d approved student access request(s) were found, but "
+                        "none had complete identifiers; skipping the trip "
+                        "schedule request",
+                        approved_record_count,
+                    )
+                else:
+                    _LOGGER.warning(
+                        "Fetched %d student access request(s), but none had "
+                        "approved status; skipping the trip schedule request",
+                        len(student_records),
+                    )
             self._trip_lookups = []
             self._last_trip_requests = []
             self._last_trip_refresh = now
