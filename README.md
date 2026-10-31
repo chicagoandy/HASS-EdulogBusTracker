@@ -57,6 +57,25 @@ next poll time while polling is active. The next-poll timestamp is the
 earliest scheduled time; the request runs on the first coordinator update due
 after that time.
 
+## Troubleshooting logs
+
+The integration logs warnings when no approved students with usable IDs are
+available, when trip schedule data is missing or does not match approved
+students, and when no assigned trips are returned. To see successful request
+counts and other diagnostic details, enable debug logging for
+`custom_components.edulog_bus_tracker` in Home Assistant's `configuration.yaml`:
+
+```yaml
+logger:
+  logs:
+    custom_components.edulog_bus_tracker: debug
+```
+
+If a `logger:` section already exists, add the integration entry under its
+`logs:` key. Restart Home Assistant after changing the configuration. The
+integration's diagnostic logs use counts and avoid logging student identifiers
+or access tokens; still avoid sharing full Home Assistant logs publicly.
+
 If the Edulog access token expires, Home Assistant creates a repair issue
 asking you to reauthenticate the integration. The issue is cleared after a
 successful sign-in.

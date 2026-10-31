@@ -8,13 +8,14 @@ from collections.abc import Mapping
 from datetime import date, datetime, time, timedelta, tzinfo
 from typing import Any
 
+import aiohttp
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryAuthFailed
 from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 from homeassistant.util import dt as dt_util
 
-from .api import EdulogApi, EdulogAuthError
+from .api import EdulogApi, EdulogApiError, EdulogAuthError
 from .const import (
     DOMAIN,
     REAUTH_ISSUE_ID_PREFIX,
@@ -55,6 +56,9 @@ class EdulogCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
         try:
             return await self._async_fetch_data()
         except EdulogAuthError as err:
+            _LOGGER.warning(
+                "Edulog authentication failed; reauthentication is required"
+            )
             ir.async_create_issue(
                 self.hass,
                 DOMAIN,
@@ -67,6 +71,15 @@ class EdulogCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
             raise ConfigEntryAuthFailed(
                 "Edulog access token expired; sign in again."
             ) from err
+        except EdulogApiError as err:
+            _LOGGER.error("Edulog API data refresh failed: %s", err)
+            raise
+        except (aiohttp.ClientError, TimeoutError) as err:
+            _LOGGER.error(
+                "Could not connect to the Edulog API (%s)",
+                type(err).__name__,
+            )
+            raise
 
     async def _async_fetch_data(self) -> dict[str, dict[str, Any]]:
         """Fetch all student trips and their vehicle locations."""
@@ -74,11 +87,16 @@ class EdulogCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
             raise EdulogAuthError("Edulog account ID is missing.")
 
         now = dt_util.now()
-        if _refresh_due(
+        student_list_refreshed = _refresh_due(
             self._last_student_refresh, now, STUDENT_LIST_REFRESH_INTERVAL
-        ):
+        )
+        if student_list_refreshed:
             self._student_records = await self.api.async_get_students()
             self._last_student_refresh = now
+            _LOGGER.debug(
+                "Fetched %d student access requests",
+                len(self._student_records),
+            )
 
         student_records = self._student_records or []
         approved_students: dict[str, dict[str, Any]] = {}
@@ -89,7 +107,10 @@ class EdulogCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
             student_id = _string(record.get("studentId"))
             tenant_id = _string(record.get("tenantId"))
             if not student_id or not tenant_id:
-                _LOGGER.warning("Skipping an approved student with incomplete identifiers")
+                if student_list_refreshed:
+                    _LOGGER.warning(
+                        "Skipping an approved student with incomplete identifiers"
+                    )
                 continue
             first_name = _string(_field(record, "firstName"))
             last_name = _string(_field(record, "lastName"))
@@ -103,6 +124,11 @@ class EdulogCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
             trip_requests.append({"studentId": student_id, "tenantId": tenant_id})
 
         if not trip_requests:
+            if student_list_refreshed:
+                _LOGGER.warning(
+                    "No approved students with complete identifiers were found; "
+                    "skipping the trip schedule request"
+                )
             self._trip_lookups = []
             self._last_trip_requests = []
             self._last_trip_refresh = now
@@ -117,15 +143,24 @@ class EdulogCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
             or trip_requests != self._last_trip_requests
         )
         if refresh_trip_schedule:
+            _LOGGER.debug(
+                "Requesting trip schedules for %d approved students",
+                len(trip_requests),
+            )
             self._trip_lookups = await self.api.async_get_trips(trip_requests)
             self._last_trip_refresh = now
             self._last_trip_requests = trip_requests
+            _LOGGER.debug(
+                "Received %d trip schedule records",
+                len(self._trip_lookups),
+            )
 
         trip_lookups = self._trip_lookups or []
         student_ids = [request["studentId"] for request in trip_requests]
         trackers: dict[str, dict[str, Any]] = {}
         requests_by_vehicle: dict[tuple[str, str], list[str]] = {}
         matched_students: set[str] = set()
+        assigned_trip_count = 0
 
         def add_unassigned_tracker(student_id: str) -> None:
             student = approved_students[student_id]
@@ -178,6 +213,7 @@ class EdulogCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
                 if not isinstance(trip, Mapping):
                     continue
                 valid_trip_count += 1
+                assigned_trip_count += 1
                 trip_id = (
                     _string(trip.get("tripId"))
                     or _string(trip.get("id"))
@@ -226,6 +262,32 @@ class EdulogCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
         for student_id in approved_students:
             if student_id not in matched_students:
                 add_unassigned_tracker(student_id)
+
+        if refresh_trip_schedule:
+            if not trip_lookups:
+                _LOGGER.warning(
+                    "The trip schedule API returned no records for %d approved "
+                    "students; existing trip entities may be unavailable",
+                    len(approved_students),
+                )
+            elif len(matched_students) != len(approved_students):
+                _LOGGER.warning(
+                    "Trip schedule data matched %d of %d approved students; "
+                    "existing trip entities for unmatched students may be unavailable",
+                    len(matched_students),
+                    len(approved_students),
+                )
+            elif assigned_trip_count == 0:
+                _LOGGER.warning(
+                    "No assigned trips were returned for %d approved students",
+                    len(approved_students),
+                )
+            else:
+                _LOGGER.debug(
+                    "Prepared %d trip trackers for %d approved students",
+                    len(trackers),
+                    len(approved_students),
+                )
 
         semaphore = asyncio.Semaphore(5)
 
