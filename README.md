@@ -67,8 +67,8 @@ school district if possible.
 
 ## License
 
-This project is distributed under the GNU General Public License v3.0 or later.
-See [LICENSE](./LICENSE) for the full text.
+Copyright (c) 2026 chicagoandy. Edulog Bus Tracker is distributed under the
+MIT License. See [LICENSE](./LICENSE) for the license text.
 
 ## Project structure
 

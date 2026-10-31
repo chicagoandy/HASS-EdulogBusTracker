@@ -1,6 +1,7 @@
 {
   "domain": "edulog_bus_tracker",
   "name": "Edulog Bus Tracker",
+  "categories": ["vehicles_transport"],
   "codeowners": ["@chicagoandy"],
   "config_flow": true,
   "documentation": "https://github.com/chicagoandy/HASSEdulogBusTracker",
