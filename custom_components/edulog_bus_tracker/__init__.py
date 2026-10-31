@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+
 import aiohttp
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
@@ -13,11 +15,14 @@ from .api import EdulogApi, EdulogHttpError
 from .const import DOMAIN
 from .coordinator import EdulogCoordinator
 
+_LOGGER = logging.getLogger(__name__)
+
 PLATFORMS = [Platform.BINARY_SENSOR, Platform.DEVICE_TRACKER, Platform.SENSOR]
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up Edulog from a config entry."""
+    _LOGGER.info("Setting up Edulog Bus Tracker integration")
     api = EdulogApi(
         async_get_clientsession(hass),
         entry.data.get("auth_token"),

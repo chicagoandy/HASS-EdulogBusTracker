@@ -63,20 +63,21 @@ The integration logs warnings when the student API returns no approved
 requests, approved requests are missing required IDs, trip schedule data is
 missing or does not match approved students, or no assigned trips are returned.
 Successful fetch counts and trip preparation summaries are logged at INFO and
-should appear at the default logging level. To see additional coordinator
-details, enable debug logging for `custom_components.edulog_bus_tracker` in
-Home Assistant's `configuration.yaml`:
+may be hidden by Home Assistant's configured log level. To show them, set the
+integration logger to `info` in Home Assistant's `configuration.yaml`. Use
+`debug` instead if you also want additional diagnostic details:
 
 ```yaml
 logger:
   logs:
-    custom_components.edulog_bus_tracker: debug
+    custom_components.edulog_bus_tracker: info
 ```
 
 If a `logger:` section already exists, add the integration entry under its
-`logs:` key. Restart Home Assistant after changing the configuration. The
-integration's diagnostic logs use counts and avoid logging student identifiers
-or access tokens; still avoid sharing full Home Assistant logs publicly.
+`logs:` key. Set the value to `debug` for additional diagnostic details.
+Restart Home Assistant after changing the configuration. The integration's
+diagnostic logs use counts and avoid logging student identifiers or access
+tokens; still avoid sharing full Home Assistant logs publicly.
 
 If the Edulog access token expires, Home Assistant creates a repair issue
 asking you to reauthenticate the integration. The issue is cleared after a
