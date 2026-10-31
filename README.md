@@ -36,21 +36,26 @@ only for that sign-in and are not stored.
 Home Assistant checks the integration for updates every 5 seconds; this is not
 the interval for every API request. On each check, it evaluates active trip
 windows using the cached trip schedules. Vehicle locations are refreshed every
-5 seconds for vehicles tied to an active trip, and every 60 seconds for other
-assigned vehicles. The approved student list is fetched at startup and
+5 seconds only for vehicles tied to an active trip; locations are not polled
+outside active trip windows. If trips share a vehicle, it is polled while any
+associated trip is active. The approved student list is fetched at startup and
 refreshed daily. Trip schedules are fetched at startup and refreshed hourly,
 or sooner if the approved student list changes. Thus, student and trip
 endpoints are not called every 5 seconds. Trip times are interpreted in Home
 Assistant's configured local timezone. A student with no returned trips gets
 a placeholder tracker; trips without an assigned vehicle remain as trackers
 with no location.
-Each trip also has a **Location polling** binary sensor. It is on when that
-trip has an assigned vehicle and is within its scheduled pickup-to-dropoff
-window, indicating that its vehicle location is polled every 5 seconds; it is
-off outside that window, when that vehicle's location is polled every 60
-seconds, or when the trip has no assigned vehicle. Each vehicle's cadence is
-independent; if multiple trips share a vehicle, it is polled every 5 seconds
-whenever any associated trip is active.
+Each trip also has a **[Trip name] location polling** binary sensor. It is on
+when that trip has an assigned vehicle and is within its scheduled
+pickup-to-dropoff window. If trips share a vehicle, the binary sensor reflects
+each trip's own window; the shared vehicle uses the faster cadence whenever
+any associated trip is active.
+Each trip also has diagnostic sensors for its vehicle's current polling
+interval and next eligible location poll time. Both are unavailable while no
+associated trip is active; shared-vehicle trips report the same interval and
+next poll time while polling is active. The next-poll timestamp is the
+earliest scheduled time; the request runs on the first coordinator update due
+after that time.
 
 If the Edulog access token expires, Home Assistant creates a repair issue
 asking you to reauthenticate the integration. The issue is cleared after a
@@ -81,6 +86,7 @@ custom_components/edulog_bus_tracker/
   coordinator.py
   device_tracker.py
   manifest.json
+  sensor.py
   strings.json
 hacs.json
 LICENSE

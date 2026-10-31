@@ -17,7 +17,6 @@ from homeassistant.util import dt as dt_util
 from .api import EdulogApi, EdulogAuthError
 from .const import (
     DOMAIN,
-    IDLE_VEHICLE_REFRESH_INTERVAL,
     REAUTH_ISSUE_ID_PREFIX,
     SCAN_INTERVAL,
     STUDENT_LIST_REFRESH_INTERVAL,
@@ -139,6 +138,8 @@ class EdulogCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
                 "vehicle_id": None,
                 "location": None,
                 "polling_active": False,
+                "polling_interval_seconds": None,
+                "next_location_poll": None,
                 "trip_type": None,
                 "pickup_stop_name": None,
                 "pickup_time": None,
@@ -206,6 +207,8 @@ class EdulogCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
                     "location": None,
                     "polling_active": bool(vehicle_id)
                     and _trip_is_active(trip, now),
+                    "polling_interval_seconds": None,
+                    "next_location_poll": None,
                     **_trip_attributes(trip),
                     "student_first_name": approved_students[student_id][
                         "student_first_name"
@@ -230,21 +233,18 @@ class EdulogCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
             async with semaphore:
                 return await self.api.async_get_vehicle_location(vehicle_id, tenant_id)
 
+        vehicle_intervals = {
+            vehicle: SCAN_INTERVAL
+            for vehicle, tracker_ids in requests_by_vehicle.items()
+            if any(
+                trackers[tracker_id]["polling_active"]
+                for tracker_id in tracker_ids
+            )
+        }
         vehicles_to_refresh = [
             vehicle
-            for vehicle in requests_by_vehicle
-            if _refresh_due(
-                self._last_vehicle_refresh.get(vehicle),
-                now,
-                (
-                    SCAN_INTERVAL
-                    if any(
-                        trackers[tracker_id]["polling_active"]
-                        for tracker_id in requests_by_vehicle[vehicle]
-                    )
-                    else IDLE_VEHICLE_REFRESH_INTERVAL
-                ),
-            )
+            for vehicle, interval in vehicle_intervals.items()
+            if _refresh_due(self._last_vehicle_refresh.get(vehicle), now, interval)
         ]
         vehicle_locations = await asyncio.gather(
             *(
@@ -256,12 +256,23 @@ class EdulogCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
             vehicles_to_refresh, vehicle_locations, strict=True
         ):
             self._vehicle_locations[vehicle] = location
-            self._last_vehicle_refresh[vehicle] = now
+            self._last_vehicle_refresh[vehicle] = dt_util.now()
 
         for vehicle, tracker_ids in requests_by_vehicle.items():
             location = self._vehicle_locations.get(vehicle)
+            interval = vehicle_intervals.get(vehicle)
+            last_refresh = self._last_vehicle_refresh.get(vehicle)
+            next_location_poll = (
+                last_refresh + interval
+                if interval is not None and last_refresh is not None
+                else None
+            )
             for tracker_id in tracker_ids:
                 trackers[tracker_id]["location"] = location
+                trackers[tracker_id]["polling_interval_seconds"] = (
+                    interval.total_seconds() if interval is not None else None
+                )
+                trackers[tracker_id]["next_location_poll"] = next_location_poll
 
         return trackers
 

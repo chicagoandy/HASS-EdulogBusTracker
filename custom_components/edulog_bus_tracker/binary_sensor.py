@@ -40,7 +40,6 @@ class EdulogTripPollingSensor(CoordinatorEntity[EdulogCoordinator], BinarySensor
     """Indicate when a trip's vehicle location is polled at the active cadence."""
 
     _attr_has_entity_name = True
-    _attr_name = "Location polling"
     _attr_icon = "mdi:sync"
 
     def __init__(
@@ -52,6 +51,7 @@ class EdulogTripPollingSensor(CoordinatorEntity[EdulogCoordinator], BinarySensor
         super().__init__(coordinator)
         trip = coordinator.data[tracker_id]
         self.tracker_id = tracker_id
+        self._attr_name = f"{trip['trip_name']} location polling"
         self._attr_unique_id = f"{entry.entry_id}_{tracker_id}_location_polling"
         self._attr_device_info = DeviceInfo(
             identifiers={(DOMAIN, f"{entry.entry_id}_{trip['student_id']}")},
