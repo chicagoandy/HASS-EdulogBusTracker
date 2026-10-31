@@ -37,10 +37,11 @@ class EdulogApi:
         self,
         session: aiohttp.ClientSession,
         access_token: str | None = None,
+        user_id: str | None = None,
     ) -> None:
         self._session = session
         self._access_token = access_token
-        self.user_id = _jwt_subject(access_token)
+        self.user_id = user_id or _jwt_subject(access_token)
 
     @property
     def access_token(self) -> str | None:

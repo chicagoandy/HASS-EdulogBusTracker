@@ -21,6 +21,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     api = EdulogApi(
         async_get_clientsession(hass),
         entry.data.get("auth_token"),
+        user_id=entry.unique_id,
     )
     coordinator = EdulogCoordinator(hass, api, entry.entry_id)
     try:
