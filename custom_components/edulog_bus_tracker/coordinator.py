@@ -56,8 +56,9 @@ class EdulogCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
         try:
             return await self._async_fetch_data()
         except EdulogAuthError as err:
-            _LOGGER.warning(
-                "Edulog authentication failed; reauthentication is required"
+            _LOGGER.error(
+                "Edulog authentication failed; reauthentication is required: %s",
+                err,
             )
             ir.async_create_issue(
                 self.hass,
@@ -161,7 +162,7 @@ class EdulogCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
             or trip_requests != self._last_trip_requests
         )
         if refresh_trip_schedule:
-            _LOGGER.info(
+            _LOGGER.debug(
                 "Requesting trip schedules for %d approved students",
                 len(trip_requests),
             )
@@ -321,11 +322,22 @@ class EdulogCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
                 for tracker_id in tracker_ids
             )
         }
+        active_trip_count = sum(
+            tracker["polling_active"] for tracker in trackers.values()
+        )
         vehicles_to_refresh = [
             vehicle
             for vehicle, interval in vehicle_intervals.items()
             if _refresh_due(self._last_vehicle_refresh.get(vehicle), now, interval)
         ]
+        _LOGGER.debug(
+            "Polling evaluation: %d trips, %d active trip(s), %d active vehicle(s); "
+            "%d location request(s) due",
+            len(trackers),
+            active_trip_count,
+            len(vehicle_intervals),
+            len(vehicles_to_refresh),
+        )
         vehicle_locations = await asyncio.gather(
             *(
                 fetch_location(vehicle_id, tenant_id)
@@ -337,6 +349,16 @@ class EdulogCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
         ):
             self._vehicle_locations[vehicle] = location
             self._last_vehicle_refresh[vehicle] = dt_util.now()
+        if vehicles_to_refresh:
+            locations_received = sum(
+                location is not None for location in vehicle_locations
+            )
+            _LOGGER.debug(
+                "Vehicle location requests completed: %d of %d returned valid "
+                "coordinates",
+                locations_received,
+                len(vehicles_to_refresh),
+            )
 
         for vehicle, tracker_ids in requests_by_vehicle.items():
             location = self._vehicle_locations.get(vehicle)
