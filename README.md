@@ -41,10 +41,11 @@ outside active trip windows. If trips share a vehicle, it is polled while any
 associated trip is active. The approved student list is fetched at startup and
 refreshed daily. Trip schedules are fetched at startup and refreshed hourly,
 or sooner if the approved student list changes. Thus, student and trip
-endpoints are not called every 5 seconds. Trip times are interpreted in Home
-Assistant's configured local timezone. A student with no returned trips gets
-a placeholder tracker; trips without an assigned vehicle remain as trackers
-with no location.
+endpoints are not called every 5 seconds. Trip times are evaluated in the
+timezone returned with each trip schedule; if the API omits or provides an
+unknown timezone, Home Assistant's configured timezone is used. A student
+with no returned trips gets a placeholder tracker; trips without an assigned
+vehicle remain as trackers with no location.
 Each trip also has a **[Trip name] location polling** binary sensor. It is on
 when that trip has an assigned vehicle and is within its scheduled
 pickup-to-dropoff window. If trips share a vehicle, the binary sensor reflects
@@ -66,9 +67,12 @@ Successful setup, fetch counts, and tracker preparation summaries are logged
 at INFO. Authentication, API, and connection failures are logged at ERROR.
 Polling decisions and vehicle location results are logged at DEBUG; that
 includes a summary on each coordinator update while debug logging is enabled,
-so use it temporarily when troubleshooting. To show INFO and ERROR messages,
-set the integration logger to `info` in Home Assistant's
-`configuration.yaml`. Use `debug` for the polling diagnostics:
+so use it temporarily when troubleshooting. Individual trip diagnostics show
+the pickup/dropoff values, whether a vehicle is assigned, and the computed
+active state; they are emitted at startup, schedule refresh, or when the
+active state changes. To show INFO and ERROR messages, set the integration
+logger to `info` in Home Assistant's `configuration.yaml`. Use `debug` for
+polling diagnostics:
 
 ```yaml
 logger:

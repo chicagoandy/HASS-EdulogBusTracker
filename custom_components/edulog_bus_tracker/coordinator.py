@@ -7,6 +7,7 @@ import logging
 from collections.abc import Mapping
 from datetime import date, datetime, time, timedelta, tzinfo
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import aiohttp
 from homeassistant.core import HomeAssistant
@@ -50,6 +51,8 @@ class EdulogCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
             tuple[str, str], dict[str, Any] | None
         ] = {}
         self._last_vehicle_refresh: dict[tuple[str, str], datetime] = {}
+        self._last_trip_polling_status: dict[str, bool] = {}
+        self._unknown_trip_timezones: set[str] = set()
 
     async def _async_update_data(self) -> dict[str, dict[str, Any]]:
         """Retrieve approved students, their trips, and latest bus positions."""
@@ -218,6 +221,20 @@ class EdulogCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
                 continue
 
             matched_students.add(student_id)
+            trip_timezone_name = _string(_field(lookup, "timezone"))
+            trip_timezone = now.tzinfo
+            if trip_timezone_name:
+                try:
+                    trip_timezone = ZoneInfo(trip_timezone_name)
+                except ZoneInfoNotFoundError:
+                    if trip_timezone_name not in self._unknown_trip_timezones:
+                        _LOGGER.warning(
+                            "Trip schedule has unrecognized timezone %r; "
+                            "using Home Assistant's timezone",
+                            trip_timezone_name,
+                        )
+                        self._unknown_trip_timezones.add(trip_timezone_name)
+
             trips = lookup.get("trips")
             if not isinstance(trips, list):
                 add_unassigned_tracker(student_id)
@@ -253,6 +270,11 @@ class EdulogCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
                 trip_name_counts[trip_name] = trip_name_counts.get(trip_name, 0) + 1
                 if trip_name_counts[trip_name] > 1:
                     trip_name = f"{trip_name} {trip_name_counts[trip_name]}"
+                pickup_time = _nested_field(trip, ("pickup", "time"))
+                dropoff_time = _nested_field(trip, ("dropoff", "time"))
+                polling_active = bool(vehicle_id) and _trip_is_active(
+                    trip, now, trip_timezone
+                )
                 trackers[tracker_id] = {
                     "student_id": student_id,
                     "name": approved_students[student_id]["name"],
@@ -260,8 +282,7 @@ class EdulogCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
                     "tenant_id": approved_students[student_id]["tenant_id"],
                     "vehicle_id": vehicle_id,
                     "location": None,
-                    "polling_active": bool(vehicle_id)
-                    and _trip_is_active(trip, now),
+                    "polling_active": polling_active,
                     "polling_interval_seconds": None,
                     "next_location_poll": None,
                     **_trip_attributes(trip),
@@ -272,6 +293,22 @@ class EdulogCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
                         "student_last_name"
                     ],
                 }
+                if (
+                    refresh_trip_schedule
+                    or self._last_trip_polling_status.get(tracker_id)
+                    != polling_active
+                ):
+                    _LOGGER.debug(
+                        "Trip polling evaluation for student request %d, trip %d: "
+                        "vehicle_assigned=%s, pickup=%r, dropoff=%r, active=%s",
+                        index + 1,
+                        trip_index + 1,
+                        bool(vehicle_id),
+                        pickup_time,
+                        dropoff_time,
+                        polling_active,
+                    )
+                self._last_trip_polling_status[tracker_id] = polling_active
                 if vehicle_id:
                     key = (vehicle_id, approved_students[student_id]["tenant_id"])
                     requests_by_vehicle.setdefault(key, []).append(tracker_id)
@@ -419,11 +456,14 @@ def _nested_field(record: Mapping[str, Any], path: tuple[str, ...]) -> Any:
     return value if isinstance(value, (str, int, float, bool)) else None
 
 
-def _trip_is_active(trip: Mapping[str, Any], now: datetime) -> bool:
-    """Compare a trip's local pickup/dropoff schedule with the current time."""
-    timezone = now.tzinfo
+def _trip_is_active(
+    trip: Mapping[str, Any], now: datetime, timezone: tzinfo | None = None
+) -> bool:
+    """Compare a trip's pickup/dropoff schedule in its assigned timezone."""
+    timezone = timezone or now.tzinfo
     if timezone is None:
         return False
+    now = now.astimezone(timezone)
     pickup_value = _nested_field(trip, ("pickup", "time"))
     dropoff_value = _nested_field(trip, ("dropoff", "time"))
     pickup = _parse_schedule_value(pickup_value, timezone, now)
