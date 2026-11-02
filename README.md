@@ -59,13 +59,13 @@ before the first route stop and ending at its scheduled drop-off. If route-stop
 data is unavailable, the pickup time is used as the start reference. Trips
 sharing a vehicle therefore share one sensor per student, and it reflects the
 vehicle's actual polling state.
-Each trip also has diagnostic sensors for its vehicle's current polling
-interval and next eligible location poll time. The interval always reports the
-configured 5-second location polling cadence, including while a trip is
-inactive. The next-poll timestamp shows the upcoming polling window start while
-inactive, then the next location refresh time while active.
-Trips that share a vehicle report the same next poll time while active. The
-request runs on the first coordinator update due after the displayed time.
+Each trip has a diagnostic sensor for the configured location polling interval,
+which always reports 5 seconds, including while the trip is inactive. Each
+distinct vehicle assigned to a student has one next eligible location poll
+timestamp sensor. For a shared vehicle, that sensor reports the earliest next
+poll across all trips using the vehicle: the upcoming polling-window start
+while inactive, or the next refresh time while active. The request runs on the
+first coordinator update due after the displayed time.
 
 ## Troubleshooting logs
 
