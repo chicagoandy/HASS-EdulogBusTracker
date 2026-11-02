@@ -42,6 +42,7 @@ class EdulogStudentTracker(CoordinatorEntity[EdulogCoordinator], TrackerEntity):
     """Represent the location of one trip's assigned bus."""
 
     _attr_has_entity_name = True
+    _attr_entity_category = None
     _attr_source_type = SourceType.GPS
 
     def __init__(
