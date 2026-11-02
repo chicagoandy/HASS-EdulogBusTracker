@@ -52,13 +52,13 @@ timezone returned with each trip schedule; if the API omits or provides an
 unknown timezone, Home Assistant's configured timezone is used. A student
 with no returned trips gets a placeholder tracker; trips without an assigned
 vehicle remain as trackers with no location.
-Each trip also has a **[Trip name] location polling** binary sensor. It is on
-when that trip has an assigned vehicle and is within the polling window,
-starting 30 minutes before the first route stop and ending at its scheduled
-drop-off. If route-stop data is unavailable, the pickup time is used as the
-start reference. If trips share a vehicle, the binary sensor reflects each
-trip's own window; the shared vehicle is polled whenever any associated trip
-is in its polling window.
+Each distinct vehicle assigned to a student has one **Vehicle [ID] location
+polling** diagnostic binary sensor on that student's device. It is on whenever
+any trip using that vehicle is in its polling window, starting 30 minutes
+before the first route stop and ending at its scheduled drop-off. If route-stop
+data is unavailable, the pickup time is used as the start reference. Trips
+sharing a vehicle therefore share one sensor per student, and it reflects the
+vehicle's actual polling state.
 Each trip also has diagnostic sensors for its vehicle's current polling
 interval and next eligible location poll time. The interval always reports the
 configured 5-second location polling cadence, including while a trip is
