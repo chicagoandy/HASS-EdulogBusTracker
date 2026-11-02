@@ -7,6 +7,7 @@ import logging
 from collections.abc import Mapping
 from datetime import date, datetime, time, timedelta, tzinfo
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import aiohttp
 from homeassistant.core import HomeAssistant
@@ -18,6 +19,7 @@ from homeassistant.util import dt as dt_util
 from .api import EdulogApi, EdulogApiError, EdulogAuthError
 from .const import (
     DOMAIN,
+    LOCATION_POLL_LEAD_TIME,
     REAUTH_ISSUE_ID_PREFIX,
     SCAN_INTERVAL,
     STUDENT_LIST_REFRESH_INTERVAL,
@@ -50,14 +52,17 @@ class EdulogCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
             tuple[str, str], dict[str, Any] | None
         ] = {}
         self._last_vehicle_refresh: dict[tuple[str, str], datetime] = {}
+        self._last_trip_polling_status: dict[str, bool] = {}
+        self._unknown_trip_timezones: set[str] = set()
 
     async def _async_update_data(self) -> dict[str, dict[str, Any]]:
         """Retrieve approved students, their trips, and latest bus positions."""
         try:
             return await self._async_fetch_data()
         except EdulogAuthError as err:
-            _LOGGER.warning(
-                "Edulog authentication failed; reauthentication is required"
+            _LOGGER.error(
+                "Edulog authentication failed; reauthentication is required: %s",
+                err,
             )
             ir.async_create_issue(
                 self.hass,
@@ -66,7 +71,6 @@ class EdulogCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
                 is_fixable=False,
                 severity=ir.IssueSeverity.ERROR,
                 translation_key="reauthenticate",
-                config_entry_id=self.config_entry_id,
             )
             raise ConfigEntryAuthFailed(
                 "Edulog access token expired; sign in again."
@@ -93,7 +97,7 @@ class EdulogCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
         if student_list_refreshed:
             self._student_records = await self.api.async_get_students()
             self._last_student_refresh = now
-            _LOGGER.debug(
+            _LOGGER.info(
                 "Fetched %d student access requests",
                 len(self._student_records),
             )
@@ -101,34 +105,52 @@ class EdulogCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
         student_records = self._student_records or []
         approved_students: dict[str, dict[str, Any]] = {}
         trip_requests: list[dict[str, str]] = []
+        approved_record_count = 0
+        incomplete_identifier_count = 0
         for record in student_records:
-            if str(record.get("status", "")).strip().lower() != "approved":
+            if str(_field(record, "status") or "").strip().lower() != "approved":
                 continue
-            student_id = _string(record.get("studentId"))
-            tenant_id = _string(record.get("tenantId"))
+            approved_record_count += 1
+            student_id = _string(_field(record, "studentId"))
+            tenant_id = _string(_field(record, "tenantId"))
             if not student_id or not tenant_id:
-                if student_list_refreshed:
-                    _LOGGER.warning(
-                        "Skipping an approved student with incomplete identifiers"
-                    )
+                incomplete_identifier_count += 1
                 continue
             first_name = _string(_field(record, "firstName"))
             last_name = _string(_field(record, "lastName"))
             full_name = " ".join(part for part in (first_name, last_name) if part)
             approved_students[student_id] = {
-                "name": full_name or _string(record.get("name")) or "Edulog student",
+                "name": full_name
+                or _string(_field(record, "name"))
+                or "Edulog student",
                 "tenant_id": tenant_id,
                 "student_first_name": first_name,
                 "student_last_name": last_name,
             }
             trip_requests.append({"studentId": student_id, "tenantId": tenant_id})
 
+        if student_list_refreshed and incomplete_identifier_count:
+            _LOGGER.warning(
+                "%d approved student access request(s) lacked a student ID or "
+                "tenant ID and were skipped",
+                incomplete_identifier_count,
+            )
+
         if not trip_requests:
             if student_list_refreshed:
-                _LOGGER.warning(
-                    "No approved students with complete identifiers were found; "
-                    "skipping the trip schedule request"
-                )
+                if approved_record_count:
+                    _LOGGER.warning(
+                        "%d approved student access request(s) were found, but "
+                        "none had complete identifiers; skipping the trip "
+                        "schedule request",
+                        approved_record_count,
+                    )
+                else:
+                    _LOGGER.warning(
+                        "Fetched %d student access request(s), but none had "
+                        "approved status; skipping the trip schedule request",
+                        len(student_records),
+                    )
             self._trip_lookups = []
             self._last_trip_requests = []
             self._last_trip_refresh = now
@@ -150,7 +172,7 @@ class EdulogCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
             self._trip_lookups = await self.api.async_get_trips(trip_requests)
             self._last_trip_refresh = now
             self._last_trip_requests = trip_requests
-            _LOGGER.debug(
+            _LOGGER.info(
                 "Received %d trip schedule records",
                 len(self._trip_lookups),
             )
@@ -199,6 +221,20 @@ class EdulogCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
                 continue
 
             matched_students.add(student_id)
+            trip_timezone_name = _string(_field(lookup, "timezone"))
+            trip_timezone = now.tzinfo
+            if trip_timezone_name:
+                try:
+                    trip_timezone = ZoneInfo(trip_timezone_name)
+                except ZoneInfoNotFoundError:
+                    if trip_timezone_name not in self._unknown_trip_timezones:
+                        _LOGGER.warning(
+                            "Trip schedule has unrecognized timezone %r; "
+                            "using Home Assistant's timezone",
+                            trip_timezone_name,
+                        )
+                        self._unknown_trip_timezones.add(trip_timezone_name)
+
             trips = lookup.get("trips")
             if not isinstance(trips, list):
                 add_unassigned_tracker(student_id)
@@ -234,6 +270,12 @@ class EdulogCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
                 trip_name_counts[trip_name] = trip_name_counts.get(trip_name, 0) + 1
                 if trip_name_counts[trip_name] > 1:
                     trip_name = f"{trip_name} {trip_name_counts[trip_name]}"
+                route_start_time = _first_route_stop_time(trip)
+                pickup_time = _nested_field(trip, ("pickup", "time"))
+                dropoff_time = _nested_field(trip, ("dropoff", "time"))
+                polling_active = bool(vehicle_id) and _trip_is_active(
+                    trip, now, trip_timezone
+                )
                 trackers[tracker_id] = {
                     "student_id": student_id,
                     "name": approved_students[student_id]["name"],
@@ -241,8 +283,7 @@ class EdulogCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
                     "tenant_id": approved_students[student_id]["tenant_id"],
                     "vehicle_id": vehicle_id,
                     "location": None,
-                    "polling_active": bool(vehicle_id)
-                    and _trip_is_active(trip, now),
+                    "polling_active": polling_active,
                     "polling_interval_seconds": None,
                     "next_location_poll": None,
                     **_trip_attributes(trip),
@@ -253,6 +294,24 @@ class EdulogCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
                         "student_last_name"
                     ],
                 }
+                if (
+                    refresh_trip_schedule
+                    or self._last_trip_polling_status.get(tracker_id)
+                    != polling_active
+                ):
+                    _LOGGER.debug(
+                        "Trip polling evaluation for student request %d, trip %d: "
+                        "vehicle_assigned=%s, first_route_stop=%r, pickup=%r, "
+                        "dropoff=%r, active=%s",
+                        index + 1,
+                        trip_index + 1,
+                        bool(vehicle_id),
+                        route_start_time,
+                        pickup_time,
+                        dropoff_time,
+                        polling_active,
+                    )
+                self._last_trip_polling_status[tracker_id] = polling_active
                 if vehicle_id:
                     key = (vehicle_id, approved_students[student_id]["tenant_id"])
                     requests_by_vehicle.setdefault(key, []).append(tracker_id)
@@ -283,7 +342,7 @@ class EdulogCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
                     len(approved_students),
                 )
             else:
-                _LOGGER.debug(
+                _LOGGER.info(
                     "Prepared %d trip trackers for %d approved students",
                     len(trackers),
                     len(approved_students),
@@ -303,11 +362,22 @@ class EdulogCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
                 for tracker_id in tracker_ids
             )
         }
+        active_trip_count = sum(
+            tracker["polling_active"] for tracker in trackers.values()
+        )
         vehicles_to_refresh = [
             vehicle
             for vehicle, interval in vehicle_intervals.items()
             if _refresh_due(self._last_vehicle_refresh.get(vehicle), now, interval)
         ]
+        _LOGGER.debug(
+            "Polling evaluation: %d trips, %d active trip(s), %d active vehicle(s); "
+            "%d location request(s) due",
+            len(trackers),
+            active_trip_count,
+            len(vehicle_intervals),
+            len(vehicles_to_refresh),
+        )
         vehicle_locations = await asyncio.gather(
             *(
                 fetch_location(vehicle_id, tenant_id)
@@ -319,6 +389,16 @@ class EdulogCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
         ):
             self._vehicle_locations[vehicle] = location
             self._last_vehicle_refresh[vehicle] = dt_util.now()
+        if vehicles_to_refresh:
+            locations_received = sum(
+                location is not None for location in vehicle_locations
+            )
+            _LOGGER.debug(
+                "Vehicle location requests completed: %d of %d returned valid "
+                "coordinates",
+                locations_received,
+                len(vehicles_to_refresh),
+            )
 
         for vehicle, tracker_ids in requests_by_vehicle.items():
             location = self._vehicle_locations.get(vehicle)
@@ -379,12 +459,48 @@ def _nested_field(record: Mapping[str, Any], path: tuple[str, ...]) -> Any:
     return value if isinstance(value, (str, int, float, bool)) else None
 
 
-def _trip_is_active(trip: Mapping[str, Any], now: datetime) -> bool:
-    """Compare a trip's local pickup/dropoff schedule with the current time."""
-    timezone = now.tzinfo
+def _first_route_stop_time(trip: Mapping[str, Any]) -> Any:
+    """Return the time for the first route stop, if the API provides it."""
+    route_stops = _field(trip, "routeStops")
+    if not isinstance(route_stops, list):
+        return None
+
+    stops = [
+        stop
+        for stop in route_stops
+        if isinstance(stop, Mapping) and _string(_field(stop, "time"))
+    ]
+    if not stops:
+        return None
+
+    sequenced_stops = [
+        (sequence, stop)
+        for stop in stops
+        if isinstance(
+            sequence := _field(stop, "stopSeqNumber"),
+            (int, float),
+        )
+        and not isinstance(sequence, bool)
+    ]
+    first_stop = (
+        min(sequenced_stops, key=lambda item: item[0])[1]
+        if sequenced_stops
+        else stops[0]
+    )
+    return _field(first_stop, "time")
+
+
+def _trip_is_active(
+    trip: Mapping[str, Any], now: datetime, timezone: tzinfo | None = None
+) -> bool:
+    """Check the polling window from 30 minutes before route start to drop-off."""
+    timezone = timezone or now.tzinfo
     if timezone is None:
         return False
-    pickup_value = _nested_field(trip, ("pickup", "time"))
+    now = now.astimezone(timezone)
+    pickup_value = _first_route_stop_time(trip) or _nested_field(
+        trip, ("pickup", "time")
+    )
     dropoff_value = _nested_field(trip, ("dropoff", "time"))
     pickup = _parse_schedule_value(pickup_value, timezone, now)
     dropoff = _parse_schedule_value(dropoff_value, timezone, now)
@@ -392,19 +508,19 @@ def _trip_is_active(trip: Mapping[str, Any], now: datetime) -> bool:
         return False
 
     if isinstance(pickup, datetime) and isinstance(dropoff, datetime):
-        return pickup <= now < dropoff
+        return pickup - LOCATION_POLL_LEAD_TIME <= now < dropoff
 
     if isinstance(pickup, datetime):
         dropoff_datetime = _combine_schedule_time(pickup.date(), dropoff, timezone)
         if dropoff_datetime <= pickup:
             dropoff_datetime += timedelta(days=1)
-        return pickup <= now < dropoff_datetime
+        return pickup - LOCATION_POLL_LEAD_TIME <= now < dropoff_datetime
 
     if isinstance(dropoff, datetime):
         pickup_datetime = _combine_schedule_time(dropoff.date(), pickup, timezone)
         if pickup_datetime >= dropoff:
             pickup_datetime -= timedelta(days=1)
-        return pickup_datetime <= now < dropoff
+        return pickup_datetime - LOCATION_POLL_LEAD_TIME <= now < dropoff
 
     for day_offset in (-1, 0):
         pickup_datetime = _combine_schedule_time(
@@ -415,7 +531,11 @@ def _trip_is_active(trip: Mapping[str, Any], now: datetime) -> bool:
         )
         if dropoff_datetime <= pickup_datetime:
             dropoff_datetime += timedelta(days=1)
-        if pickup_datetime <= now < dropoff_datetime:
+        if (
+            pickup_datetime - LOCATION_POLL_LEAD_TIME
+            <= now
+            < dropoff_datetime
+        ):
             return True
     return False
 

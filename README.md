@@ -25,31 +25,38 @@ To install through HACS before it is listed in the default store, go to
 ## Setup
 
 Sign in with the Edulog Parent Portal email and password. They are used only to
-request an access token and are not saved. Home Assistant stores only the access
-token in the config entry. The account ID is read from the token when Home
-Assistant starts and is not stored separately. If the access token expires, the
-integration asks you to sign in again; replacement credentials are also used
-only for that sign-in and are not stored.
+request access and refresh tokens and are not saved. Home Assistant stores
+those tokens in the integration config entry. The integration refreshes the
+access token shortly before it expires and retries once with a refreshed token
+if an API request returns unauthorized. Any rotated tokens are saved back to
+the config entry. The account ID is stored as the config entry's unique ID.
+Treat Home Assistant backups and config-entry data as sensitive because they
+contain authentication tokens. Older entries without a refresh token will ask
+you to reauthenticate when their access token can no longer be used.
 
 ## Polling and behavior
 
 Home Assistant checks the integration for updates every 5 seconds; this is not
 the interval for every API request. On each check, it evaluates active trip
 windows using the cached trip schedules. Vehicle locations are refreshed every
-5 seconds only for vehicles tied to an active trip; locations are not polled
-outside active trip windows. If trips share a vehicle, it is polled while any
-associated trip is active. The approved student list is fetched at startup and
+5 seconds for vehicles tied to a trip, starting 30 minutes before that route's
+first stop and continuing through the trip's drop-off time. Locations are not
+polled outside those windows. If trips share a vehicle, it is polled while any
+associated trip is in its polling window. The approved student list is fetched at startup and
 refreshed daily. Trip schedules are fetched at startup and refreshed hourly,
 or sooner if the approved student list changes. Thus, student and trip
-endpoints are not called every 5 seconds. Trip times are interpreted in Home
-Assistant's configured local timezone. A student with no returned trips gets
-a placeholder tracker; trips without an assigned vehicle remain as trackers
-with no location.
+endpoints are not called every 5 seconds. Trip times are evaluated in the
+timezone returned with each trip schedule; if the API omits or provides an
+unknown timezone, Home Assistant's configured timezone is used. A student
+with no returned trips gets a placeholder tracker; trips without an assigned
+vehicle remain as trackers with no location.
 Each trip also has a **[Trip name] location polling** binary sensor. It is on
-when that trip has an assigned vehicle and is within its scheduled
-pickup-to-dropoff window. If trips share a vehicle, the binary sensor reflects
-each trip's own window; the shared vehicle uses the faster cadence whenever
-any associated trip is active.
+when that trip has an assigned vehicle and is within the polling window,
+starting 30 minutes before the first route stop and ending at its scheduled
+drop-off. If route-stop data is unavailable, the pickup time is used as the
+start reference. If trips share a vehicle, the binary sensor reflects each
+trip's own window; the shared vehicle is polled whenever any associated trip
+is in its polling window.
 Each trip also has diagnostic sensors for its vehicle's current polling
 interval and next eligible location poll time. Both are unavailable while no
 associated trip is active; shared-vehicle trips report the same interval and
@@ -59,11 +66,19 @@ after that time.
 
 ## Troubleshooting logs
 
-The integration logs warnings when no approved students with usable IDs are
-available, when trip schedule data is missing or does not match approved
-students, and when no assigned trips are returned. To see successful request
-counts and other diagnostic details, enable debug logging for
-`custom_components.edulog_bus_tracker` in Home Assistant's `configuration.yaml`:
+The integration logs warnings when the student API returns no approved
+requests, approved requests are missing required IDs, trip schedule data is
+missing or does not match approved students, or no assigned trips are returned.
+Successful setup, fetch counts, and tracker preparation summaries are logged
+at INFO. Authentication, API, and connection failures are logged at ERROR.
+Polling decisions and vehicle location results are logged at DEBUG; that
+includes a summary on each coordinator update while debug logging is enabled,
+so use it temporarily when troubleshooting. Individual trip diagnostics show
+the pickup/dropoff values, whether a vehicle is assigned, and the computed
+active state; they are emitted at startup, schedule refresh, or when the
+active state changes. To show INFO and ERROR messages, set the integration
+logger to `info` in Home Assistant's `configuration.yaml`. Use `debug` for
+polling diagnostics:
 
 ```yaml
 logger:
@@ -73,8 +88,9 @@ logger:
 
 If a `logger:` section already exists, add the integration entry under its
 `logs:` key. Restart Home Assistant after changing the configuration. The
-integration's diagnostic logs use counts and avoid logging student identifiers
-or access tokens; still avoid sharing full Home Assistant logs publicly.
+integration's diagnostic logs use counts and avoid logging student identifiers,
+vehicle identifiers, coordinates, or access tokens; still avoid sharing full
+Home Assistant logs publicly.
 
 If the Edulog access token expires, Home Assistant creates a repair issue
 asking you to reauthenticate the integration. The issue is cleared after a

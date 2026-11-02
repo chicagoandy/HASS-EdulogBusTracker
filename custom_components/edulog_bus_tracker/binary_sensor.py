@@ -67,6 +67,6 @@ class EdulogTripPollingSensor(CoordinatorEntity[EdulogCoordinator], BinarySensor
 
     @property
     def is_on(self) -> bool:
-        """Return whether the trip is in its active location polling window."""
+        """Return whether the trip is in its location polling window."""
         trip = self.coordinator.data.get(self.tracker_id, {})
         return bool(trip.get("polling_active", False))
