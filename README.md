@@ -52,6 +52,9 @@ timezone returned with each trip schedule; if the API omits or provides an
 unknown timezone, Home Assistant's configured timezone is used. A student
 with no returned trips gets a placeholder tracker; trips without an assigned
 vehicle remain as trackers with no location.
+Each student also has an **Any trip active** diagnostic binary sensor. It is on
+when at least one of that student's trips has an assigned vehicle and is
+within its location polling window.
 Each distinct vehicle assigned to a student has one **Vehicle [ID] location
 polling** diagnostic binary sensor on that student's device. It is on whenever
 any trip using that vehicle is in its polling window, starting 30 minutes
@@ -59,13 +62,13 @@ before the first route stop and ending at its scheduled drop-off. If route-stop
 data is unavailable, the pickup time is used as the start reference. Trips
 sharing a vehicle therefore share one sensor per student, and it reflects the
 vehicle's actual polling state.
-Each trip has a diagnostic sensor for the configured location polling interval,
-which always reports 5 seconds, including while the trip is inactive. Each
-distinct vehicle assigned to a student has one next eligible location poll
-timestamp sensor. For a shared vehicle, that sensor reports the earliest next
-poll across all trips using the vehicle: the upcoming polling-window start
-while inactive, or the next refresh time while active. The request runs on the
-first coordinator update due after the displayed time.
+Each distinct vehicle assigned to a student has one diagnostic sensor for its
+configured location polling interval, which always reports 5 seconds, and one
+next eligible location poll timestamp sensor. For a shared vehicle, the
+timestamp reports the earliest next poll across all trips using the vehicle:
+the upcoming polling-window start while inactive, or the next refresh time
+while active. The request runs on the first coordinator update due after the
+displayed time.
 
 ## Troubleshooting logs
 
