@@ -71,7 +71,6 @@ class EdulogCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
                 is_fixable=False,
                 severity=ir.IssueSeverity.ERROR,
                 translation_key="reauthenticate",
-                config_entry_id=self.config_entry_id,
             )
             raise ConfigEntryAuthFailed(
                 "Edulog access token expired; sign in again."
