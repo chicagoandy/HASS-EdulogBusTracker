@@ -17,7 +17,7 @@ from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from .const import DOMAIN
+from .const import DOMAIN, SCAN_INTERVAL
 from .coordinator import EdulogCoordinator
 
 
@@ -78,12 +78,8 @@ class EdulogTripDiagnosticSensor(CoordinatorEntity[EdulogCoordinator], SensorEnt
 
     @property
     def available(self) -> bool:
-        """Only report diagnostics while this trip is actively polled."""
-        return (
-            super().available
-            and self.tracker_id in self.coordinator.data
-            and bool(self._trip.get("polling_active", False))
-        )
+        """Only report diagnostics while this trip remains in the account."""
+        return super().available and self.tracker_id in self.coordinator.data
 
     @property
     def _trip(self) -> dict[str, Any]:
@@ -108,10 +104,14 @@ class EdulogTripPollingIntervalSensor(EdulogTripDiagnosticSensor):
         )
 
     @property
-    def native_value(self) -> float | None:
-        """Return the effective polling interval in seconds."""
-        interval = self._trip.get("polling_interval_seconds")
-        return interval if isinstance(interval, (int, float)) else None
+    def available(self) -> bool:
+        """The configured polling cadence is known independently of API state."""
+        return True
+
+    @property
+    def native_value(self) -> float:
+        """Return the configured location polling interval in seconds."""
+        return SCAN_INTERVAL.total_seconds()
 
 
 class EdulogTripNextPollSensor(EdulogTripDiagnosticSensor):
@@ -131,7 +131,12 @@ class EdulogTripNextPollSensor(EdulogTripDiagnosticSensor):
         )
 
     @property
+    def available(self) -> bool:
+        """Report the next poll time while active or awaiting the window."""
+        return super().available and self.native_value is not None
+
+    @property
     def native_value(self) -> datetime | None:
-        """Return when the vehicle next becomes due for a location refresh."""
+        """Return the next refresh time or the scheduled polling-window start."""
         next_poll = self._trip.get("next_location_poll")
         return next_poll if isinstance(next_poll, datetime) else None

@@ -60,11 +60,12 @@ start reference. If trips share a vehicle, the binary sensor reflects each
 trip's own window; the shared vehicle is polled whenever any associated trip
 is in its polling window.
 Each trip also has diagnostic sensors for its vehicle's current polling
-interval and next eligible location poll time. Both are unavailable while no
-associated trip is active; shared-vehicle trips report the same interval and
-next poll time while polling is active. The next-poll timestamp is the
-earliest scheduled time; the request runs on the first coordinator update due
-after that time.
+interval and next eligible location poll time. The interval always reports the
+configured 5-second location polling cadence, including while a trip is
+inactive. The next-poll timestamp shows the upcoming polling window start while
+inactive, then the next location refresh time while active.
+Trips that share a vehicle report the same next poll time while active. The
+request runs on the first coordinator update due after the displayed time.
 
 ## Troubleshooting logs
 

@@ -196,7 +196,6 @@ class EdulogCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
                 "vehicle_id": None,
                 "location": None,
                 "polling_active": False,
-                "polling_interval_seconds": None,
                 "next_location_poll": None,
                 "trip_type": None,
                 "pickup_stop_name": None,
@@ -277,6 +276,11 @@ class EdulogCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
                 polling_active = bool(vehicle_id) and _trip_is_active(
                     trip, now, trip_timezone
                 )
+                next_poll_start = (
+                    _next_polling_start_time(trip, now, trip_timezone)
+                    if vehicle_id and not polling_active
+                    else None
+                )
                 trackers[tracker_id] = {
                     "student_id": student_id,
                     "name": approved_students[student_id]["name"],
@@ -285,8 +289,7 @@ class EdulogCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
                     "vehicle_id": vehicle_id,
                     "location": None,
                     "polling_active": polling_active,
-                    "polling_interval_seconds": None,
-                    "next_location_poll": None,
+                    "next_location_poll": next_poll_start,
                     **_trip_attributes(trip),
                     "student_first_name": approved_students[student_id][
                         "student_first_name"
@@ -421,10 +424,8 @@ class EdulogCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
             )
             for tracker_id in tracker_ids:
                 trackers[tracker_id]["location"] = location
-                trackers[tracker_id]["polling_interval_seconds"] = (
-                    interval.total_seconds() if interval is not None else None
-                )
-                trackers[tracker_id]["next_location_poll"] = next_location_poll
+                if next_location_poll is not None:
+                    trackers[tracker_id]["next_location_poll"] = next_location_poll
 
         return trackers
 
@@ -548,6 +549,34 @@ def _trip_is_active(
         ):
             return True
     return False
+
+
+def _next_polling_start_time(
+    trip: Mapping[str, Any], now: datetime, timezone: tzinfo | None = None
+) -> datetime | None:
+    """Return the next scheduled start of this trip's location polling window."""
+    timezone = timezone or now.tzinfo
+    if timezone is None:
+        return None
+    now = now.astimezone(timezone)
+    start_value = _first_route_stop_time(trip) or _nested_field(
+        trip, ("pickup", "time")
+    )
+    start = _parse_schedule_value(start_value, timezone, now)
+    if start is None:
+        return None
+
+    if isinstance(start, datetime):
+        polling_start = start - LOCATION_POLL_LEAD_TIME
+        return polling_start if polling_start > now else None
+
+    polling_start = (
+        _combine_schedule_time(now.date(), start, timezone)
+        - LOCATION_POLL_LEAD_TIME
+    )
+    if polling_start <= now:
+        polling_start += timedelta(days=1)
+    return polling_start
 
 
 def _parse_schedule_value(
