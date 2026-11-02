@@ -23,10 +23,23 @@ PLATFORMS = [Platform.BINARY_SENSOR, Platform.DEVICE_TRACKER, Platform.SENSOR]
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up Edulog from a config entry."""
     _LOGGER.info("Setting up Edulog Bus Tracker integration")
+
+    def update_tokens(access_token: str, refresh_token: str) -> None:
+        hass.config_entries.async_update_entry(
+            entry,
+            data={
+                **entry.data,
+                "auth_token": access_token,
+                "refresh_token": refresh_token,
+            },
+        )
+
     api = EdulogApi(
         async_get_clientsession(hass),
         entry.data.get("auth_token"),
         user_id=entry.unique_id,
+        refresh_token=entry.data.get("refresh_token"),
+        token_update_callback=update_tokens,
     )
     coordinator = EdulogCoordinator(hass, api, entry.entry_id)
     try:
@@ -51,7 +64,7 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
 
 async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    """Migrate older entries and remove credentials and account IDs."""
+    """Migrate older config-entry data formats."""
     if entry.version == 1:
         hass.config_entries.async_update_entry(
             entry,
@@ -66,6 +79,13 @@ async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             if entry.data.get("auth_token")
             else {},
             version=3,
+        )
+        return True
+    if entry.version == 3:
+        hass.config_entries.async_update_entry(
+            entry,
+            data=dict(entry.data),
+            version=4,
         )
         return True
 

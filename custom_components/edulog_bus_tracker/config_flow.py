@@ -19,12 +19,16 @@ from .const import DOMAIN, REAUTH_ISSUE_ID_PREFIX
 
 async def _get_auth_token(
     hass: HomeAssistant, email: str, password: str
-) -> tuple[str, str]:
+) -> tuple[str, str, str]:
     api = EdulogApi(async_get_clientsession(hass))
     await api.async_login(email, password)
-    if api.access_token is None or api.user_id is None:
+    if (
+        api.access_token is None
+        or api.refresh_token is None
+        or api.user_id is None
+    ):
         raise EdulogAuthError("The login response was incomplete.")
-    return api.access_token, api.user_id
+    return api.access_token, api.refresh_token, api.user_id
 
 
 def _login_error(err: Exception) -> str:
@@ -38,7 +42,7 @@ def _login_error(err: Exception) -> str:
 class EdulogConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Handle a config flow for Edulog Bus Tracker."""
 
-    VERSION = 3
+    VERSION = 4
 
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
@@ -47,7 +51,7 @@ class EdulogConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         errors: dict[str, str] = {}
         if user_input is not None:
             try:
-                access_token, user_id = await _get_auth_token(
+                access_token, refresh_token, user_id = await _get_auth_token(
                     self.hass,
                     user_input[CONF_USERNAME],
                     user_input[CONF_PASSWORD],
@@ -61,7 +65,10 @@ class EdulogConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 self._abort_if_unique_id_configured()
                 return self.async_create_entry(
                     title="Edulog Parent Portal",
-                    data={"auth_token": access_token},
+                    data={
+                        "auth_token": access_token,
+                        "refresh_token": refresh_token,
+                    },
                 )
 
         return self.async_show_form(
@@ -89,7 +96,7 @@ class EdulogConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         errors: dict[str, str] = {}
         if user_input is not None:
             try:
-                access_token, user_id = await _get_auth_token(
+                access_token, refresh_token, user_id = await _get_auth_token(
                     self.hass,
                     user_input[CONF_USERNAME],
                     user_input[CONF_PASSWORD],
@@ -104,7 +111,10 @@ class EdulogConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 else:
                     self.hass.config_entries.async_update_entry(
                         self._reauth_entry,
-                        data={"auth_token": access_token},
+                        data={
+                            "auth_token": access_token,
+                            "refresh_token": refresh_token,
+                        },
                     )
                     ir.async_delete_issue(
                         self.hass,

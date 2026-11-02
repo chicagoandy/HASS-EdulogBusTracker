@@ -19,6 +19,7 @@ from homeassistant.util import dt as dt_util
 from .api import EdulogApi, EdulogApiError, EdulogAuthError
 from .const import (
     DOMAIN,
+    LOCATION_POLL_LEAD_TIME,
     REAUTH_ISSUE_ID_PREFIX,
     SCAN_INTERVAL,
     STUDENT_LIST_REFRESH_INTERVAL,
@@ -270,6 +271,7 @@ class EdulogCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
                 trip_name_counts[trip_name] = trip_name_counts.get(trip_name, 0) + 1
                 if trip_name_counts[trip_name] > 1:
                     trip_name = f"{trip_name} {trip_name_counts[trip_name]}"
+                route_start_time = _first_route_stop_time(trip)
                 pickup_time = _nested_field(trip, ("pickup", "time"))
                 dropoff_time = _nested_field(trip, ("dropoff", "time"))
                 polling_active = bool(vehicle_id) and _trip_is_active(
@@ -300,10 +302,12 @@ class EdulogCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
                 ):
                     _LOGGER.debug(
                         "Trip polling evaluation for student request %d, trip %d: "
-                        "vehicle_assigned=%s, pickup=%r, dropoff=%r, active=%s",
+                        "vehicle_assigned=%s, first_route_stop=%r, pickup=%r, "
+                        "dropoff=%r, active=%s",
                         index + 1,
                         trip_index + 1,
                         bool(vehicle_id),
+                        route_start_time,
                         pickup_time,
                         dropoff_time,
                         polling_active,
@@ -456,15 +460,48 @@ def _nested_field(record: Mapping[str, Any], path: tuple[str, ...]) -> Any:
     return value if isinstance(value, (str, int, float, bool)) else None
 
 
+def _first_route_stop_time(trip: Mapping[str, Any]) -> Any:
+    """Return the time for the first route stop, if the API provides it."""
+    route_stops = _field(trip, "routeStops")
+    if not isinstance(route_stops, list):
+        return None
+
+    stops = [
+        stop
+        for stop in route_stops
+        if isinstance(stop, Mapping) and _string(_field(stop, "time"))
+    ]
+    if not stops:
+        return None
+
+    sequenced_stops = [
+        (sequence, stop)
+        for stop in stops
+        if isinstance(
+            sequence := _field(stop, "stopSeqNumber"),
+            (int, float),
+        )
+        and not isinstance(sequence, bool)
+    ]
+    first_stop = (
+        min(sequenced_stops, key=lambda item: item[0])[1]
+        if sequenced_stops
+        else stops[0]
+    )
+    return _field(first_stop, "time")
+
+
 def _trip_is_active(
     trip: Mapping[str, Any], now: datetime, timezone: tzinfo | None = None
 ) -> bool:
-    """Compare a trip's pickup/dropoff schedule in its assigned timezone."""
+    """Check the polling window from 30 minutes before route start to drop-off."""
     timezone = timezone or now.tzinfo
     if timezone is None:
         return False
     now = now.astimezone(timezone)
-    pickup_value = _nested_field(trip, ("pickup", "time"))
+    pickup_value = _first_route_stop_time(trip) or _nested_field(
+        trip, ("pickup", "time")
+    )
     dropoff_value = _nested_field(trip, ("dropoff", "time"))
     pickup = _parse_schedule_value(pickup_value, timezone, now)
     dropoff = _parse_schedule_value(dropoff_value, timezone, now)
@@ -472,19 +509,19 @@ def _trip_is_active(
         return False
 
     if isinstance(pickup, datetime) and isinstance(dropoff, datetime):
-        return pickup <= now < dropoff
+        return pickup - LOCATION_POLL_LEAD_TIME <= now < dropoff
 
     if isinstance(pickup, datetime):
         dropoff_datetime = _combine_schedule_time(pickup.date(), dropoff, timezone)
         if dropoff_datetime <= pickup:
             dropoff_datetime += timedelta(days=1)
-        return pickup <= now < dropoff_datetime
+        return pickup - LOCATION_POLL_LEAD_TIME <= now < dropoff_datetime
 
     if isinstance(dropoff, datetime):
         pickup_datetime = _combine_schedule_time(dropoff.date(), pickup, timezone)
         if pickup_datetime >= dropoff:
             pickup_datetime -= timedelta(days=1)
-        return pickup_datetime <= now < dropoff
+        return pickup_datetime - LOCATION_POLL_LEAD_TIME <= now < dropoff
 
     for day_offset in (-1, 0):
         pickup_datetime = _combine_schedule_time(
@@ -495,7 +532,11 @@ def _trip_is_active(
         )
         if dropoff_datetime <= pickup_datetime:
             dropoff_datetime += timedelta(days=1)
-        if pickup_datetime <= now < dropoff_datetime:
+        if (
+            pickup_datetime - LOCATION_POLL_LEAD_TIME
+            <= now
+            < dropoff_datetime
+        ):
             return True
     return False
 
