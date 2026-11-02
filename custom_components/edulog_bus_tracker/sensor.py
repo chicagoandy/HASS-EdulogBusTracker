@@ -78,8 +78,12 @@ class EdulogTripDiagnosticSensor(CoordinatorEntity[EdulogCoordinator], SensorEnt
 
     @property
     def available(self) -> bool:
-        """Only report this sensor while its trip remains in the account."""
-        return super().available and self.tracker_id in self.coordinator.data
+        """Only report diagnostics while this trip is actively polled."""
+        return (
+            super().available
+            and self.tracker_id in self.coordinator.data
+            and bool(self._trip.get("polling_active", False))
+        )
 
     @property
     def _trip(self) -> dict[str, Any]:

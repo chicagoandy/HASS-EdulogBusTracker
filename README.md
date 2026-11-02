@@ -38,14 +38,16 @@ you to reauthenticate when their access token can no longer be used.
 
 Home Assistant checks the integration for updates every 5 seconds; this is not
 the interval for every API request. On each check, it evaluates active trip
-windows using the cached trip schedules. Vehicle locations are refreshed every
-5 seconds for vehicles tied to a trip, starting 30 minutes before that route's
-first stop and continuing through the trip's drop-off time. Locations are not
-polled outside those windows. If trips share a vehicle, it is polled while any
-associated trip is in its polling window. The approved student list is fetched at startup and
-refreshed daily. Trip schedules are fetched at startup and refreshed hourly,
-or sooner if the approved student list changes. Thus, student and trip
-endpoints are not called every 5 seconds. Trip times are evaluated in the
+windows using the cached trip schedules. At startup, it makes one location
+request for each assigned vehicle to initialize tracker entities, even if the
+trip is not yet in its polling window. After startup, vehicle locations are
+refreshed every 5 seconds only for vehicles tied to a trip from 30 minutes
+before that route's first stop through the trip's drop-off time. If trips share
+a vehicle, it is polled while any associated trip is in its polling window.
+The approved student list is fetched at startup and refreshed daily. Trip
+schedules are fetched at startup and refreshed hourly, or sooner if the
+approved student list changes. Thus, student and trip endpoints are not called
+every 5 seconds. Trip times are evaluated in the
 timezone returned with each trip schedule; if the API omits or provides an
 unknown timezone, Home Assistant's configured timezone is used. A student
 with no returned trips gets a placeholder tracker; trips without an assigned

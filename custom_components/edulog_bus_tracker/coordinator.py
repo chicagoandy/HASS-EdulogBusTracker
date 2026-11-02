@@ -54,6 +54,7 @@ class EdulogCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
         self._last_vehicle_refresh: dict[tuple[str, str], datetime] = {}
         self._last_trip_polling_status: dict[str, bool] = {}
         self._unknown_trip_timezones: set[str] = set()
+        self._initial_location_refresh_complete = False
 
     async def _async_update_data(self) -> dict[str, dict[str, Any]]:
         """Retrieve approved students, their trips, and latest bus positions."""
@@ -367,8 +368,16 @@ class EdulogCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
         )
         vehicles_to_refresh = [
             vehicle
-            for vehicle, interval in vehicle_intervals.items()
-            if _refresh_due(self._last_vehicle_refresh.get(vehicle), now, interval)
+            for vehicle in requests_by_vehicle
+            if not self._initial_location_refresh_complete
+            or (
+                vehicle in vehicle_intervals
+                and _refresh_due(
+                    self._last_vehicle_refresh.get(vehicle),
+                    now,
+                    vehicle_intervals[vehicle],
+                )
+            )
         ]
         _LOGGER.debug(
             "Polling evaluation: %d trips, %d active trip(s), %d active vehicle(s); "
@@ -384,6 +393,7 @@ class EdulogCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
                 for vehicle_id, tenant_id in vehicles_to_refresh
             )
         )
+        self._initial_location_refresh_complete = True
         for vehicle, location in zip(
             vehicles_to_refresh, vehicle_locations, strict=True
         ):
