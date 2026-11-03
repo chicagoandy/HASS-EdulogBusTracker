@@ -3,9 +3,10 @@
 A Home Assistant custom integration that creates one Home Assistant device for
 each approved student in an Edulog Parent Portal account. The student's device
 contains a device tracker for each returned trip, reporting the live location
-of its assigned vehicle, and a **Location polling** binary sensor for each
-trip. Entity names combine the student and trip names (for example,
-`Elliana Metcalfe - Trip 1`).
+of its assigned vehicle, and diagnostic polling entities. Entities use
+Home Assistant's device-based naming; each bus location tracker exposes its
+trip name in the `trip` attribute, and vehicle diagnostic entities expose
+their `vehicle_id` attribute.
 Tracker attributes include `student_first_name`, `student_last_name`,
 `trip_type`, `pickup_stop_name`, `pickup_time`, `dropoff_stop_name`, and
 `dropoff_time`, along with available vehicle details. Other fields from the
@@ -43,7 +44,11 @@ request for each assigned vehicle to initialize tracker entities, even if the
 trip is not yet in its polling window. After startup, vehicle locations are
 refreshed every 5 seconds only for vehicles tied to a trip from 30 minutes
 before that route's first stop through the trip's drop-off time. If trips share
-a vehicle, it is polled while any associated trip is in its polling window.
+a vehicle, it is polled once per vehicle while any associated trip is in its
+polling window. Vehicle-location API errors trigger per-vehicle exponential
+backoff, starting at 10 seconds and capped at 5 minutes; a successful request
+resets the backoff. Authentication failures still trigger reauthentication
+immediately.
 The approved student list is fetched at startup and refreshed daily. Trip
 schedules are fetched at startup and refreshed hourly, or sooner if the
 approved student list changes. Thus, student and trip endpoints are not called
@@ -55,20 +60,21 @@ vehicle remain as trackers with no location.
 Each student also has an **Any trip active** diagnostic binary sensor. It is on
 when at least one of that student's trips has an assigned vehicle and is
 within its location polling window.
-Each distinct vehicle assigned to a student has one **Vehicle [ID] location
-polling** diagnostic binary sensor on that student's device. It is on whenever
-any trip using that vehicle is in its polling window, starting 30 minutes
-before the first route stop and ending at its scheduled drop-off. If route-stop
-data is unavailable, the pickup time is used as the start reference. Trips
-sharing a vehicle therefore share one sensor per student, and it reflects the
-vehicle's actual polling state.
-Each distinct vehicle assigned to a student has one diagnostic sensor for its
-configured location polling interval, which always reports 5 seconds, and one
-next eligible location poll timestamp sensor. For a shared vehicle, the
-timestamp reports the earliest next poll across all trips using the vehicle:
-the upcoming polling-window start while inactive, or the next refresh time
-while active. The request runs on the first coordinator update due after the
-displayed time.
+Each distinct vehicle assigned to a student has one **Location polling**
+diagnostic binary sensor on that student's device. Its `vehicle_id` attribute
+identifies the vehicle, and it is on whenever any trip using that vehicle is
+in its polling window, starting 30 minutes before the first route stop and
+ending at its scheduled drop-off. If route-stop data is unavailable, the
+pickup time is used as the start reference. Trips sharing a vehicle therefore
+share one sensor per student, and it reflects the vehicle's actual polling
+state.
+Each distinct vehicle assigned to a student has one **Location polling
+interval** diagnostic sensor, which always reports 5 seconds, and one **Next
+eligible location poll** timestamp sensor. Their `vehicle_id` attributes
+identify the vehicle. For a shared vehicle, the timestamp reports the earliest
+next poll across all trips using the vehicle: the upcoming polling-window
+start while inactive, or the next refresh time while active. The request runs
+on the first coordinator update due after the displayed time.
 
 ## Troubleshooting logs
 

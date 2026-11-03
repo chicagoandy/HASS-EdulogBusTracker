@@ -89,7 +89,7 @@ class EdulogVehicleDiagnosticSensor(
         self.tenant_id = tenant_id
         self.vehicle_id = vehicle_id
         self.vehicle_key = (student_id, tenant_id, vehicle_id)
-        self._attr_name = f"Vehicle {vehicle_id} {sensor_name}"
+        self._attr_name = sensor_name
         self._attr_unique_id = (
             f"{entry.entry_id}_{student_id}_{tenant_id}_{vehicle_id}_{sensor_key}"
         )
@@ -99,6 +99,11 @@ class EdulogVehicleDiagnosticSensor(
             manufacturer="Edulog",
             model="Student bus tracking",
         )
+
+    @property
+    def extra_state_attributes(self) -> dict[str, str]:
+        """Expose the vehicle associated with this diagnostic sensor."""
+        return {"vehicle_id": self.vehicle_id}
 
     @property
     def available(self) -> bool:
@@ -132,7 +137,7 @@ class EdulogVehiclePollingIntervalSensor(EdulogVehicleDiagnosticSensor):
             tenant_id,
             vehicle_id,
             "polling_interval",
-            "location polling interval",
+            "Location polling interval",
         )
 
     @property
@@ -166,7 +171,7 @@ class EdulogVehicleNextPollSensor(EdulogVehicleDiagnosticSensor):
             tenant_id,
             vehicle_id,
             "next_location_poll",
-            "next eligible location poll",
+            "Next eligible location poll",
         )
 
     @property

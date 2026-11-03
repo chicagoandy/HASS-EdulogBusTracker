@@ -19,6 +19,8 @@ from homeassistant.util import dt as dt_util
 from .api import EdulogApi, EdulogApiError, EdulogAuthError
 from .const import (
     DOMAIN,
+    LOCATION_POLL_BACKOFF_INITIAL,
+    LOCATION_POLL_BACKOFF_MAX,
     LOCATION_POLL_LEAD_TIME,
     REAUTH_ISSUE_ID_PREFIX,
     SCAN_INTERVAL,
@@ -52,6 +54,8 @@ class EdulogCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
             tuple[str, str], dict[str, Any] | None
         ] = {}
         self._last_vehicle_refresh: dict[tuple[str, str], datetime] = {}
+        self._vehicle_poll_failures: dict[tuple[str, str], int] = {}
+        self._vehicle_retry_after: dict[tuple[str, str], datetime] = {}
         self._last_trip_polling_status: dict[str, bool] = {}
         self._unknown_trip_timezones: set[str] = set()
         self._initial_location_refresh_complete = False
@@ -354,9 +358,37 @@ class EdulogCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
 
         semaphore = asyncio.Semaphore(5)
 
-        async def fetch_location(vehicle_id: str, tenant_id: str) -> dict[str, Any] | None:
+        async def fetch_location(
+            vehicle: tuple[str, str],
+        ) -> tuple[dict[str, Any] | None, Exception | None]:
+            vehicle_id, tenant_id = vehicle
             async with semaphore:
-                return await self.api.async_get_vehicle_location(vehicle_id, tenant_id)
+                try:
+                    return (
+                        await self.api.async_get_vehicle_location(
+                            vehicle_id, tenant_id
+                        ),
+                        None,
+                    )
+                except EdulogAuthError:
+                    raise
+                except (EdulogApiError, aiohttp.ClientError, TimeoutError) as err:
+                    failures = self._vehicle_poll_failures.get(vehicle, 0) + 1
+                    self._vehicle_poll_failures[vehicle] = failures
+                    backoff_seconds = min(
+                        LOCATION_POLL_BACKOFF_INITIAL.total_seconds()
+                        * 2 ** min(failures - 1, 5),
+                        LOCATION_POLL_BACKOFF_MAX.total_seconds(),
+                    )
+                    self._vehicle_retry_after[vehicle] = (
+                        dt_util.now() + timedelta(seconds=backoff_seconds)
+                    )
+                    _LOGGER.warning(
+                        "Vehicle location request failed (%s); retrying in %d seconds",
+                        type(err).__name__,
+                        int(backoff_seconds),
+                    )
+                    return None, err
 
         vehicle_intervals = {
             vehicle: SCAN_INTERVAL
@@ -380,6 +412,10 @@ class EdulogCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
                     now,
                     vehicle_intervals[vehicle],
                 )
+                and (
+                    vehicle not in self._vehicle_retry_after
+                    or now >= self._vehicle_retry_after[vehicle]
+                )
             )
         ]
         _LOGGER.debug(
@@ -390,21 +426,24 @@ class EdulogCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
             len(vehicle_intervals),
             len(vehicles_to_refresh),
         )
-        vehicle_locations = await asyncio.gather(
+        vehicle_results = await asyncio.gather(
             *(
-                fetch_location(vehicle_id, tenant_id)
-                for vehicle_id, tenant_id in vehicles_to_refresh
+                fetch_location(vehicle) for vehicle in vehicles_to_refresh
             )
         )
         self._initial_location_refresh_complete = True
-        for vehicle, location in zip(
-            vehicles_to_refresh, vehicle_locations, strict=True
+        for vehicle, (location, error) in zip(
+            vehicles_to_refresh, vehicle_results, strict=True
         ):
-            self._vehicle_locations[vehicle] = location
-            self._last_vehicle_refresh[vehicle] = dt_util.now()
+            if error is None:
+                self._vehicle_locations[vehicle] = location
+                self._last_vehicle_refresh[vehicle] = dt_util.now()
+                self._vehicle_poll_failures.pop(vehicle, None)
+                self._vehicle_retry_after.pop(vehicle, None)
         if vehicles_to_refresh:
             locations_received = sum(
-                location is not None for location in vehicle_locations
+                location is not None and error is None
+                for location, error in vehicle_results
             )
             _LOGGER.debug(
                 "Vehicle location requests completed: %d of %d returned valid "
@@ -417,11 +456,13 @@ class EdulogCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
             location = self._vehicle_locations.get(vehicle)
             interval = vehicle_intervals.get(vehicle)
             last_refresh = self._last_vehicle_refresh.get(vehicle)
-            next_location_poll = (
-                last_refresh + interval
-                if interval is not None and last_refresh is not None
-                else None
-            )
+            retry_after = self._vehicle_retry_after.get(vehicle)
+            if retry_after is not None:
+                next_location_poll = retry_after
+            elif interval is not None and last_refresh is not None:
+                next_location_poll = last_refresh + interval
+            else:
+                next_location_poll = None
             for tracker_id in tracker_ids:
                 trackers[tracker_id]["location"] = location
                 if next_location_poll is not None:
