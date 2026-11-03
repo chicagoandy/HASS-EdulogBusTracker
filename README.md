@@ -4,9 +4,9 @@ A Home Assistant custom integration that creates one Home Assistant device for
 each approved student in an Edulog Parent Portal account. The student's device
 contains a device tracker for each returned trip, reporting the live location
 of its assigned vehicle, and diagnostic polling entities. Entities use
-Home Assistant's device-based naming; each bus location tracker exposes its
-trip name in the `trip` attribute, and vehicle diagnostic entities expose
-their `vehicle_id` attribute.
+Home Assistant's device-based naming; each bus location tracker includes its
+trip name or number in the entity name and exposes it in the `trip` attribute.
+Vehicle diagnostic entities expose their `vehicle_id` attribute.
 Tracker attributes include `student_first_name`, `student_last_name`,
 `trip_type`, `pickup_stop_name`, `pickup_time`, `dropoff_stop_name`, and
 `dropoff_time`, along with available vehicle details. Other fields from the

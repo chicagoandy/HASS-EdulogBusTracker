@@ -54,7 +54,7 @@ class EdulogStudentTracker(CoordinatorEntity[EdulogCoordinator], TrackerEntity):
         super().__init__(coordinator)
         trip = coordinator.data[tracker_id]
         self.tracker_id = tracker_id
-        self._attr_name = "Bus location"
+        self._attr_name = trip["trip_name"]
         self._attr_unique_id = f"{entry.entry_id}_{tracker_id}"
         self._attr_device_info = DeviceInfo(
             identifiers={(DOMAIN, f"{entry.entry_id}_{trip['student_id']}")},
