@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any
 
 from homeassistant.components.sensor import (
     SensorDeviceClass,
@@ -17,7 +16,7 @@ from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from .const import DOMAIN
+from .const import DOMAIN, SCAN_INTERVAL
 from .coordinator import EdulogCoordinator
 
 
@@ -26,32 +25,44 @@ async def async_setup_entry(
     entry: ConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
-    """Set up polling diagnostics for each approved student trip."""
+    """Set up diagnostics for each student vehicle."""
     coordinator: EdulogCoordinator = hass.data[DOMAIN][entry.entry_id]
-    added_tracker_ids: set[str] = set()
+    added_vehicle_keys: set[tuple[str, str, str]] = set()
 
-    def add_new_trips() -> None:
-        new_entities = [
-            sensor_type(coordinator, entry, tracker_id)
-            for tracker_id in coordinator.data
-            if tracker_id not in added_tracker_ids
-            for sensor_type in (
-                EdulogTripPollingIntervalSensor,
-                EdulogTripNextPollSensor,
+    def add_new_diagnostics() -> None:
+        vehicle_keys = {
+            (trip["student_id"], trip["tenant_id"], trip["vehicle_id"])
+            for trip in coordinator.data.values()
+            if trip.get("vehicle_id")
+        }
+        new_entities: list[SensorEntity] = []
+        for student_id, tenant_id, vehicle_id in vehicle_keys:
+            if (student_id, tenant_id, vehicle_id) in added_vehicle_keys:
+                continue
+            new_entities.extend(
+                (
+                    EdulogVehiclePollingIntervalSensor(
+                        coordinator, entry, student_id, tenant_id, vehicle_id
+                    ),
+                    EdulogVehicleNextPollSensor(
+                        coordinator, entry, student_id, tenant_id, vehicle_id
+                    ),
+                )
             )
-        ]
         if new_entities:
-            added_tracker_ids.update(
-                entity.tracker_id for entity in new_entities
+            added_vehicle_keys.update(
+                entity.vehicle_key for entity in new_entities
             )
             async_add_entities(new_entities)
 
-    entry.async_on_unload(coordinator.async_add_listener(add_new_trips))
-    add_new_trips()
+    entry.async_on_unload(coordinator.async_add_listener(add_new_diagnostics))
+    add_new_diagnostics()
 
 
-class EdulogTripDiagnosticSensor(CoordinatorEntity[EdulogCoordinator], SensorEntity):
-    """Base class for diagnostic sensors associated with a student trip."""
+class EdulogVehicleDiagnosticSensor(
+    CoordinatorEntity[EdulogCoordinator], SensorEntity
+):
+    """Base class for diagnostic sensors associated with a student vehicle."""
 
     _attr_has_entity_name = True
     _attr_entity_category = EntityCategory.DIAGNOSTIC
@@ -60,74 +71,117 @@ class EdulogTripDiagnosticSensor(CoordinatorEntity[EdulogCoordinator], SensorEnt
         self,
         coordinator: EdulogCoordinator,
         entry: ConfigEntry,
-        tracker_id: str,
+        student_id: str,
+        tenant_id: str,
+        vehicle_id: str,
         sensor_key: str,
         sensor_name: str,
     ) -> None:
         super().__init__(coordinator)
-        trip = coordinator.data[tracker_id]
-        self.tracker_id = tracker_id
-        self._attr_name = f"{trip['trip_name']} {sensor_name}"
-        self._attr_unique_id = f"{entry.entry_id}_{tracker_id}_{sensor_key}"
+        student_trip = next(
+            trip
+            for trip in coordinator.data.values()
+            if trip["student_id"] == student_id
+            and trip["tenant_id"] == tenant_id
+            and trip["vehicle_id"] == vehicle_id
+        )
+        self.student_id = student_id
+        self.tenant_id = tenant_id
+        self.vehicle_id = vehicle_id
+        self.vehicle_key = (student_id, tenant_id, vehicle_id)
+        self._attr_name = sensor_name
+        self._attr_unique_id = (
+            f"{entry.entry_id}_{student_id}_{tenant_id}_{vehicle_id}_{sensor_key}"
+        )
         self._attr_device_info = DeviceInfo(
-            identifiers={(DOMAIN, f"{entry.entry_id}_{trip['student_id']}")},
-            name=trip["name"],
+            identifiers={(DOMAIN, f"{entry.entry_id}_{student_id}")},
+            name=student_trip["name"],
             manufacturer="Edulog",
             model="Student bus tracking",
         )
 
     @property
-    def available(self) -> bool:
-        """Only report this sensor while its trip remains in the account."""
-        return super().available and self.tracker_id in self.coordinator.data
+    def extra_state_attributes(self) -> dict[str, str]:
+        """Expose the vehicle associated with this diagnostic sensor."""
+        return {"vehicle_id": self.vehicle_id}
 
     @property
-    def _trip(self) -> dict[str, Any]:
-        return self.coordinator.data.get(self.tracker_id, {})
+    def available(self) -> bool:
+        """Only report vehicles still assigned to this student."""
+        return super().available and any(
+            trip["student_id"] == self.student_id
+            and trip["tenant_id"] == self.tenant_id
+            and trip["vehicle_id"] == self.vehicle_id
+            for trip in self.coordinator.data.values()
+        )
 
 
-class EdulogTripPollingIntervalSensor(EdulogTripDiagnosticSensor):
-    """Report the current location polling interval for a trip's vehicle."""
+class EdulogVehiclePollingIntervalSensor(EdulogVehicleDiagnosticSensor):
+    """Report the configured location polling interval for a vehicle."""
 
     _attr_native_unit_of_measurement = UnitOfTime.SECONDS
     _attr_state_class = SensorStateClass.MEASUREMENT
 
     def __init__(
-        self, coordinator: EdulogCoordinator, entry: ConfigEntry, tracker_id: str
+        self,
+        coordinator: EdulogCoordinator,
+        entry: ConfigEntry,
+        student_id: str,
+        tenant_id: str,
+        vehicle_id: str,
     ) -> None:
         super().__init__(
             coordinator,
             entry,
-            tracker_id,
+            student_id,
+            tenant_id,
+            vehicle_id,
             "polling_interval",
-            "location polling interval",
+            "Location polling interval",
         )
 
     @property
-    def native_value(self) -> float | None:
-        """Return the effective polling interval in seconds."""
-        interval = self._trip.get("polling_interval_seconds")
-        return interval if isinstance(interval, (int, float)) else None
+    def available(self) -> bool:
+        """The configured polling cadence is known independently of API state."""
+        return True
+
+    @property
+    def native_value(self) -> float:
+        """Return the configured location polling interval in seconds."""
+        return SCAN_INTERVAL.total_seconds()
 
 
-class EdulogTripNextPollSensor(EdulogTripDiagnosticSensor):
-    """Report the next eligible location poll time for a trip's vehicle."""
+class EdulogVehicleNextPollSensor(EdulogVehicleDiagnosticSensor):
+    """Report the next eligible location poll time for a student's vehicle."""
 
     _attr_device_class = SensorDeviceClass.TIMESTAMP
 
     def __init__(
-        self, coordinator: EdulogCoordinator, entry: ConfigEntry, tracker_id: str
+        self,
+        coordinator: EdulogCoordinator,
+        entry: ConfigEntry,
+        student_id: str,
+        tenant_id: str,
+        vehicle_id: str,
     ) -> None:
         super().__init__(
             coordinator,
             entry,
-            tracker_id,
+            student_id,
+            tenant_id,
+            vehicle_id,
             "next_location_poll",
-            "next eligible location poll",
+            "Next eligible location poll",
         )
 
     @property
     def native_value(self) -> datetime | None:
-        """Return when the vehicle next becomes due for a location refresh."""
-        next_poll = self._trip.get("next_location_poll")
-        return next_poll if isinstance(next_poll, datetime) else None
+        """Return the earliest next poll time for this vehicle."""
+        next_polls = [
+            trip["next_location_poll"]
+            for trip in self.coordinator.data.values()
+            if trip["tenant_id"] == self.tenant_id
+            and trip["vehicle_id"] == self.vehicle_id
+            and isinstance(trip.get("next_location_poll"), datetime)
+        ]
+        return min(next_polls) if next_polls else None
