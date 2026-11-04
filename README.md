@@ -5,8 +5,12 @@ each approved student in an Edulog Parent Portal account. The student's device
 contains one device tracker for each distinct assigned vehicle, reporting its
 live location, and diagnostic polling entities. When multiple trips use the
 same vehicle, they share one tracker; it lists the associated trips in its
-`trip` and `trips` attributes. Vehicle diagnostic entities expose their
-`vehicle_id` attribute.
+`trip` and `trips` attributes. Trackers use generic `Vehicle 1`, `Vehicle 2`,
+etc. names and account/student-scoped entity IDs, rather than exposing the
+Edulog vehicle ID in their names or entity IDs. Entity IDs follow the
+`device_tracker.edulog_<account>_<student>_vehicle_<number>` pattern; numbering
+is retained for registered vehicles and new vehicles receive the next number.
+Vehicle diagnostic entities expose their `vehicle_id` attribute.
 Tracker attributes include `student_first_name`, `student_last_name`,
 `trip_type`, `pickup_stop_name`, `pickup_time`, `dropoff_stop_name`, and
 `dropoff_time`, along with available vehicle details. For shared vehicles,
