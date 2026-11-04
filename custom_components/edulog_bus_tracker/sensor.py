@@ -47,6 +47,9 @@ async def async_setup_entry(
                     EdulogVehicleNextPollSensor(
                         coordinator, entry, student_id, tenant_id, vehicle_id
                     ),
+                    EdulogVehicleTelemetryHealthSensor(
+                        coordinator, entry, student_id, tenant_id, vehicle_id
+                    ),
                 )
             )
         if new_entities:
@@ -185,3 +188,43 @@ class EdulogVehicleNextPollSensor(EdulogVehicleDiagnosticSensor):
             and isinstance(trip.get("next_location_poll"), datetime)
         ]
         return min(next_polls) if next_polls else None
+
+
+class EdulogVehicleTelemetryHealthSensor(EdulogVehicleDiagnosticSensor):
+    """Report whether the latest vehicle telemetry request succeeded."""
+
+    _attr_device_class = SensorDeviceClass.ENUM
+    _attr_icon = "mdi:heart-pulse"
+    _attr_options = ["unknown", "healthy", "no_data", "stale"]
+
+    def __init__(
+        self,
+        coordinator: EdulogCoordinator,
+        entry: ConfigEntry,
+        student_id: str,
+        tenant_id: str,
+        vehicle_id: str,
+    ) -> None:
+        super().__init__(
+            coordinator,
+            entry,
+            student_id,
+            tenant_id,
+            vehicle_id,
+            "telemetry_health",
+            "Telemetry health",
+        )
+
+    @property
+    def native_value(self) -> str:
+        """Return the health of the latest vehicle telemetry request."""
+        return next(
+            (
+                trip.get("telemetry_health", "unknown")
+                for trip in self.coordinator.data.values()
+                if trip["student_id"] == self.student_id
+                and trip["tenant_id"] == self.tenant_id
+                and trip["vehicle_id"] == self.vehicle_id
+            ),
+            "unknown",
+        )

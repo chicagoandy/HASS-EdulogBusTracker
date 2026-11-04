@@ -7,7 +7,6 @@ import logging
 from collections.abc import Mapping
 from datetime import date, datetime, time, timedelta, tzinfo
 from typing import Any
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import aiohttp
 from homeassistant.core import HomeAssistant
@@ -53,6 +52,7 @@ class EdulogCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
         self._vehicle_locations: dict[
             tuple[str, str], dict[str, Any] | None
         ] = {}
+        self._vehicle_telemetry_health: dict[tuple[str, str], str] = {}
         self._last_vehicle_refresh: dict[tuple[str, str], datetime] = {}
         self._vehicle_poll_failures: dict[tuple[str, str], int] = {}
         self._vehicle_retry_after: dict[tuple[str, str], datetime] = {}
@@ -228,9 +228,11 @@ class EdulogCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
             trip_timezone_name = _string(_field(lookup, "timezone"))
             trip_timezone = now.tzinfo
             if trip_timezone_name:
-                try:
-                    trip_timezone = ZoneInfo(trip_timezone_name)
-                except ZoneInfoNotFoundError:
+                trip_timezone = await dt_util.async_get_time_zone(
+                    trip_timezone_name
+                )
+                if trip_timezone is None:
+                    trip_timezone = now.tzinfo
                     if trip_timezone_name not in self._unknown_trip_timezones:
                         _LOGGER.warning(
                             "Trip schedule has unrecognized timezone %r; "
@@ -437,9 +439,15 @@ class EdulogCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
         ):
             if error is None:
                 self._vehicle_locations[vehicle] = location
+                self._vehicle_telemetry_health[vehicle] = (
+                    "healthy" if location is not None else "no_data"
+                )
                 self._last_vehicle_refresh[vehicle] = dt_util.now()
                 self._vehicle_poll_failures.pop(vehicle, None)
                 self._vehicle_retry_after.pop(vehicle, None)
+            else:
+                self._vehicle_locations.pop(vehicle, None)
+                self._vehicle_telemetry_health[vehicle] = "stale"
         if vehicles_to_refresh:
             locations_received = sum(
                 location is not None and error is None
@@ -465,6 +473,9 @@ class EdulogCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
                 next_location_poll = None
             for tracker_id in tracker_ids:
                 trackers[tracker_id]["location"] = location
+                trackers[tracker_id]["telemetry_health"] = (
+                    self._vehicle_telemetry_health.get(vehicle, "unknown")
+                )
                 if next_location_poll is not None:
                     trackers[tracker_id]["next_location_poll"] = next_location_poll
 
