@@ -187,11 +187,15 @@ class EdulogCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
         trackers: dict[str, dict[str, Any]] = {}
         requests_by_vehicle: dict[tuple[str, str], list[str]] = {}
         matched_students: set[str] = set()
+        students_with_vehicles: set[str] = set()
         assigned_trip_count = 0
+        active_trip_count = 0
 
         def add_unassigned_tracker(student_id: str) -> None:
             student = approved_students[student_id]
             tracker_id = f"{student_id}_unassigned"
+            if tracker_id in trackers:
+                return
             trackers[tracker_id] = {
                 "student_id": student_id,
                 "name": student["name"],
@@ -250,7 +254,6 @@ class EdulogCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
                 continue
 
             valid_trip_count = 0
-            trip_name_counts: dict[str, int] = {}
             for trip_index, trip in enumerate(trips):
                 if not isinstance(trip, Mapping):
                     continue
@@ -261,10 +264,12 @@ class EdulogCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
                     or _string(trip.get("id"))
                     or f"trip_{trip_index + 1}"
                 )
-                tracker_id = f"{student_id}_{trip_id}"
-                if tracker_id in trackers:
-                    tracker_id = f"{tracker_id}_{trip_index + 1}"
                 vehicle_id = _string(trip.get("vehicleId"))
+                if not vehicle_id:
+                    continue
+                tenant_id = approved_students[student_id]["tenant_id"]
+                tracker_id = f"{student_id}_vehicle_{tenant_id}_{vehicle_id}"
+                polling_status_key = f"{tracker_id}_{trip_id}_{trip_index}"
                 trip_name = next(
                     (
                         value
@@ -273,40 +278,57 @@ class EdulogCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
                     ),
                     f"Trip {trip_index + 1}",
                 )
-                trip_name_counts[trip_name] = trip_name_counts.get(trip_name, 0) + 1
-                if trip_name_counts[trip_name] > 1:
-                    trip_name = f"{trip_name} {trip_name_counts[trip_name]}"
                 route_start_time = _first_route_stop_time(trip)
                 pickup_time = _nested_field(trip, ("pickup", "time"))
                 dropoff_time = _nested_field(trip, ("dropoff", "time"))
                 polling_active = bool(vehicle_id) and _trip_is_active(
                     trip, now, trip_timezone
                 )
+                active_trip_count += polling_active
                 next_poll_start = (
                     _next_polling_start_time(trip, now, trip_timezone)
                     if vehicle_id and not polling_active
                     else None
                 )
-                trackers[tracker_id] = {
-                    "student_id": student_id,
-                    "name": approved_students[student_id]["name"],
-                    "trip_name": trip_name,
-                    "tenant_id": approved_students[student_id]["tenant_id"],
-                    "vehicle_id": vehicle_id,
-                    "location": None,
-                    "polling_active": polling_active,
-                    "next_location_poll": next_poll_start,
-                    **_trip_attributes(trip),
-                    "student_first_name": approved_students[student_id][
-                        "student_first_name"
-                    ],
-                    "student_last_name": approved_students[student_id][
-                        "student_last_name"
-                    ],
-                }
+                trip_details = {"name": trip_name, **_trip_attributes(trip)}
+                existing_tracker = trackers.get(tracker_id)
+                if existing_tracker is None:
+                    trackers[tracker_id] = {
+                        "student_id": student_id,
+                        "name": approved_students[student_id]["name"],
+                        "trip_names": [trip_name],
+                        "trips": [trip_details],
+                        "tenant_id": tenant_id,
+                        "vehicle_id": vehicle_id,
+                        "location": None,
+                        "polling_active": polling_active,
+                        "next_location_poll": next_poll_start,
+                        **_trip_attributes(trip),
+                        "student_first_name": approved_students[student_id][
+                            "student_first_name"
+                        ],
+                        "student_last_name": approved_students[student_id][
+                            "student_last_name"
+                        ],
+                    }
+                    requests_by_vehicle.setdefault(
+                        (vehicle_id, tenant_id), []
+                    ).append(tracker_id)
+                else:
+                    existing_tracker["trip_names"].append(trip_name)
+                    existing_tracker["trips"].append(trip_details)
+                    existing_tracker["polling_active"] |= polling_active
+                    if next_poll_start is not None:
+                        current_next_poll = existing_tracker["next_location_poll"]
+                        if (
+                            current_next_poll is None
+                            or next_poll_start < current_next_poll
+                        ):
+                            existing_tracker["next_location_poll"] = next_poll_start
+                students_with_vehicles.add(student_id)
                 if (
                     refresh_trip_schedule
-                    or self._last_trip_polling_status.get(tracker_id)
+                    or self._last_trip_polling_status.get(polling_status_key)
                     != polling_active
                 ):
                     _LOGGER.debug(
@@ -321,15 +343,12 @@ class EdulogCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
                         dropoff_time,
                         polling_active,
                     )
-                self._last_trip_polling_status[tracker_id] = polling_active
-                if vehicle_id:
-                    key = (vehicle_id, approved_students[student_id]["tenant_id"])
-                    requests_by_vehicle.setdefault(key, []).append(tracker_id)
+                self._last_trip_polling_status[polling_status_key] = polling_active
             if not valid_trip_count:
                 add_unassigned_tracker(student_id)
 
         for student_id in approved_students:
-            if student_id not in matched_students:
+            if student_id not in matched_students or student_id not in students_with_vehicles:
                 add_unassigned_tracker(student_id)
 
         if refresh_trip_schedule:
@@ -353,8 +372,11 @@ class EdulogCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
                 )
             else:
                 _LOGGER.info(
-                    "Prepared %d trip trackers for %d approved students",
-                    len(trackers),
+                    "Prepared %d vehicle trackers for %d approved students",
+                    sum(
+                        tracker.get("vehicle_id") is not None
+                        for tracker in trackers.values()
+                    ),
                     len(approved_students),
                 )
 
@@ -400,9 +422,6 @@ class EdulogCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
                 for tracker_id in tracker_ids
             )
         }
-        active_trip_count = sum(
-            tracker["polling_active"] for tracker in trackers.values()
-        )
         vehicles_to_refresh = [
             vehicle
             for vehicle in requests_by_vehicle
@@ -423,7 +442,7 @@ class EdulogCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
         _LOGGER.debug(
             "Polling evaluation: %d trips, %d active trip(s), %d active vehicle(s); "
             "%d location request(s) due",
-            len(trackers),
+            assigned_trip_count,
             active_trip_count,
             len(vehicle_intervals),
             len(vehicles_to_refresh),
