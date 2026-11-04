@@ -2,15 +2,21 @@
 
 A Home Assistant custom integration that creates one Home Assistant device for
 each approved student in an Edulog Parent Portal account. The student's device
-contains a device tracker for each returned trip, reporting the live location
-of its assigned vehicle, and diagnostic polling entities. Entities use
-Home Assistant's device-based naming; each bus location tracker includes its
-trip name or number in the entity name and exposes it in the `trip` attribute.
+contains one device tracker for each distinct assigned vehicle, reporting its
+live location, and diagnostic polling entities. When multiple trips use the
+same vehicle, they share one tracker; it lists the associated trips in its
+`trip` and `trips` attributes. Trackers use generic `Vehicle 1`, `Vehicle 2`,
+etc. names and account/student-scoped entity IDs, rather than exposing the
+Edulog vehicle ID in their names or entity IDs. Entity IDs follow the
+`device_tracker.edulog_<account>_<student>_vehicle_<number>` pattern; numbering
+is retained for registered vehicles and new vehicles receive the next number.
 Vehicle diagnostic entities expose their `vehicle_id` attribute.
 Tracker attributes include `student_first_name`, `student_last_name`,
 `trip_type`, `pickup_stop_name`, `pickup_time`, `dropoff_stop_name`, and
-`dropoff_time`, along with available vehicle details. Other fields from the
-student and trip API responses are not exposed.
+`dropoff_time`, along with available vehicle details. For shared vehicles,
+these top-level trip details reflect the first associated trip; `trips` contains
+selected details for every associated trip. Other fields from the student and
+trip API responses are not exposed.
 
 ## Installation
 
@@ -54,9 +60,8 @@ schedules are fetched at startup and refreshed hourly, or sooner if the
 approved student list changes. Thus, student and trip endpoints are not called
 every 5 seconds. Trip times are evaluated in the
 timezone returned with each trip schedule; if the API omits or provides an
-unknown timezone, Home Assistant's configured timezone is used. A student
-with no returned trips gets a placeholder tracker; trips without an assigned
-vehicle remain as trackers with no location.
+unknown timezone, Home Assistant's configured timezone is used. Students without an
+assigned vehicle do not get a location tracker.
 Each student also has an **Any trip active** diagnostic binary sensor. It is on
 when at least one of that student's trips has an assigned vehicle and is
 within its location polling window.
