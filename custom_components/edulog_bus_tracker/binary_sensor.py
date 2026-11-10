@@ -3,24 +3,24 @@
 from __future__ import annotations
 
 from homeassistant.components.binary_sensor import BinarySensorEntity
-from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import EntityCategory
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
+from . import EdulogConfigEntry
 from .const import DOMAIN
 from .coordinator import EdulogCoordinator
 
 
 async def async_setup_entry(
     hass: HomeAssistant,
-    entry: ConfigEntry,
+    entry: EdulogConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     """Set up student trip-state and vehicle polling diagnostic sensors."""
-    coordinator: EdulogCoordinator = hass.data[DOMAIN][entry.entry_id]
+    coordinator = entry.runtime_data
     added_vehicle_keys: set[tuple[str, str, str]] = set()
     added_student_ids: set[str] = set()
 
@@ -78,7 +78,7 @@ class EdulogStudentActiveTripsSensor(
     def __init__(
         self,
         coordinator: EdulogCoordinator,
-        entry: ConfigEntry,
+        entry: EdulogConfigEntry,
         student_id: str,
     ) -> None:
         super().__init__(coordinator)
@@ -127,7 +127,7 @@ class EdulogVehiclePollingSensor(
     def __init__(
         self,
         coordinator: EdulogCoordinator,
-        entry: ConfigEntry,
+        entry: EdulogConfigEntry,
         student_id: str,
         tenant_id: str,
         vehicle_id: str,

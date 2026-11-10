@@ -151,7 +151,7 @@ class EdulogApi:
             if response.status >= 400:
                 await response.read()
                 raise EdulogHttpError(response.status)
-            return await response.json(content_type=None)
+            return await _read_json(response)
 
     def _is_access_token_expiring(self) -> bool:
         """Return whether the access token expires within the refresh margin."""
@@ -196,7 +196,7 @@ class EdulogApi:
                 if response.status >= 400:
                     await response.read()
                     raise EdulogHttpError(response.status)
-                data = await response.json(content_type=None)
+                data = await _read_json(response)
 
             if not isinstance(data, Mapping):
                 raise EdulogApiError(
@@ -215,7 +215,7 @@ class EdulogApi:
             self._access_token_expires_at = _jwt_expiration(access_token)
             if self._token_update_callback and self._refresh_token:
                 self._token_update_callback(self._access_token, self._refresh_token)
-            _LOGGER.info("Successfully refreshed Edulog access token")
+            _LOGGER.debug("Refreshed the Edulog access token")
 
     async def async_get_students(self) -> list[dict[str, Any]]:
         """Return the account's approved and pending student access requests."""
@@ -237,21 +237,33 @@ class EdulogApi:
     async def async_get_trips(
         self, students: list[dict[str, str]]
     ) -> list[dict[str, Any]]:
-        """Return trip records for the provided student and tenant IDs."""
-        if not students:
-            return []
-        tenant_id = students[0]["tenantId"]
-        headers = {"x-v2-tenant-id": tenant_id} if tenant_id else {}
-        data = await self._request_json(
-            "POST",
-            "/api/v2/pp/students/trips",
-            json_body=students,
-            headers=headers,
-        )
-        records = _extract_records(data, ("transportationLookups", "result", "content", "data"))
-        if records is None:
-            raise EdulogApiError("The student trips response had an unexpected format.")
-        return [record for record in records if isinstance(record, dict)]
+        """Return trip records for the provided student and tenant IDs.
+
+        The trips endpoint is scoped by the tenant header, so students from
+        different districts are requested separately, one call per tenant.
+        """
+        students_by_tenant: dict[str, list[dict[str, str]]] = {}
+        for student in students:
+            students_by_tenant.setdefault(student["tenantId"], []).append(student)
+
+        trips: list[dict[str, Any]] = []
+        for tenant_id, tenant_students in students_by_tenant.items():
+            headers = {"x-v2-tenant-id": tenant_id} if tenant_id else {}
+            data = await self._request_json(
+                "POST",
+                "/api/v2/pp/students/trips",
+                json_body=tenant_students,
+                headers=headers,
+            )
+            records = _extract_records(
+                data, ("transportationLookups", "result", "content", "data")
+            )
+            if records is None:
+                raise EdulogApiError(
+                    "The student trips response had an unexpected format."
+                )
+            trips.extend(record for record in records if isinstance(record, dict))
+        return trips
 
     async def async_get_vehicle_location(
         self, vehicle_id: str, tenant_id: str
@@ -290,6 +302,14 @@ class EdulogApi:
                     "vehicleId": vehicle_id,
                 }
         return None
+
+
+async def _read_json(response: aiohttp.ClientResponse) -> Any:
+    """Decode a JSON body, reporting malformed responses as API errors."""
+    try:
+        return await response.json(content_type=None)
+    except ValueError as err:
+        raise EdulogApiError("The Edulog API returned invalid JSON.") from err
 
 
 def _extract_records(

@@ -5,38 +5,53 @@ from __future__ import annotations
 from typing import Any
 
 from homeassistant.components.device_tracker import SourceType, TrackerEntity
-from homeassistant.config_entries import ConfigEntry
+from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.device_registry import DeviceInfo
-from homeassistant.helpers.entity_registry import (
-    async_get as async_get_entity_registry,
-)
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from homeassistant.util import slugify
 
+from . import EdulogConfigEntry
 from .const import DOMAIN
 from .coordinator import EdulogCoordinator
+
+_VEHICLE_NAME_PREFIX = "Vehicle "
 
 
 async def async_setup_entry(
     hass: HomeAssistant,
-    entry: ConfigEntry,
+    entry: EdulogConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     """Set up one tracker for each vehicle assigned to an approved student."""
-    coordinator: EdulogCoordinator = hass.data[DOMAIN][entry.entry_id]
+    coordinator = entry.runtime_data
+    registry = er.async_get(hass)
     added_tracker_ids: set[str] = set()
-    registry = async_get_entity_registry(hass)
-    vehicle_numbers: dict[str, int] = {}
-    next_number_by_student: dict[str, int] = {}
+    used_numbers_by_student: dict[str, set[int]] = {}
 
-    def assign_vehicle_numbers() -> list[tuple[str, dict[str, Any]]]:
-        vehicle_items = sorted(
+    def registered_number(tracker_id: str) -> int | None:
+        """Return the number this tracker was first registered with, if any.
+
+        This reads the tracker's own registry entry and changes nothing:
+        original_name is what the integration set, so a user's rename or
+        entity ID change does not affect it.
+        """
+        entity_id = registry.async_get_entity_id(
+            Platform.DEVICE_TRACKER, DOMAIN, f"{entry.entry_id}_{tracker_id}"
+        )
+        if entity_id is None or (entity := registry.async_get(entity_id)) is None:
+            return None
+        suffix = (entity.original_name or "").removeprefix(_VEHICLE_NAME_PREFIX)
+        return int(suffix) if suffix.isdecimal() and int(suffix) > 0 else None
+
+    def add_new_vehicles() -> None:
+        new_vehicles = sorted(
             (
                 (tracker_id, vehicle)
                 for tracker_id, vehicle in coordinator.data.items()
-                if vehicle.get("vehicle_id")
+                if vehicle.get("vehicle_id") and tracker_id not in added_tracker_ids
             ),
             key=lambda item: (
                 item[1]["student_id"],
@@ -44,87 +59,31 @@ async def async_setup_entry(
                 item[1]["vehicle_id"],
             ),
         )
-        vehicles_by_unique_id = {
-            f"{entry.entry_id}_{tracker_id}": (tracker_id, vehicle)
-            for tracker_id, vehicle in vehicle_items
+        # Reserve the numbers of already registered trackers first, so a new
+        # vehicle never takes the number of one that is known but unassigned.
+        numbers = {
+            tracker_id: registered_number(tracker_id)
+            for tracker_id, _vehicle in new_vehicles
         }
-        for entity in registry.entities.values():
-            vehicle_match = vehicles_by_unique_id.get(entity.unique_id)
-            if vehicle_match is None:
-                continue
-            tracker_id, vehicle = vehicle_match
-            object_id_prefix = _suggested_object_id(
-                entry, vehicle["student_id"], 1
-            ).rsplit("_vehicle_", 1)[0]
-            entity_id_prefix = f"device_tracker.{object_id_prefix}_vehicle_"
-            if not entity.entity_id.startswith(entity_id_prefix):
-                continue
-            suffix = entity.entity_id.removeprefix(entity_id_prefix)
-            if not suffix.isdecimal():
-                continue
-            number = int(suffix)
-            if number > 0:
-                vehicle_numbers[tracker_id] = number
-                student_id = vehicle["student_id"]
-                next_number_by_student[student_id] = max(
-                    next_number_by_student.get(student_id, 0), number
-                )
+        for tracker_id, vehicle in new_vehicles:
+            if (number := numbers[tracker_id]) is not None:
+                used_numbers_by_student.setdefault(
+                    vehicle["student_id"], set()
+                ).add(number)
 
-        for tracker_id, vehicle in vehicle_items:
-            if tracker_id in vehicle_numbers:
-                continue
-            student_id = vehicle["student_id"]
-            number = next_number_by_student.get(student_id, 0) + 1
-            vehicle_numbers[tracker_id] = number
-            next_number_by_student[student_id] = number
-        return vehicle_items
-
-    def add_new_vehicles() -> None:
-        vehicle_items = assign_vehicle_numbers()
-        new_entities = [
-            EdulogVehicleTracker(
-                coordinator, entry, tracker_id, vehicle_numbers[tracker_id]
+        new_entities: list[EdulogVehicleTracker] = []
+        for tracker_id, vehicle in new_vehicles:
+            used = used_numbers_by_student.setdefault(vehicle["student_id"], set())
+            number = numbers[tracker_id]
+            if number is None:
+                number = next(n for n in range(1, len(used) + 2) if n not in used)
+                used.add(number)
+            new_entities.append(
+                EdulogVehicleTracker(coordinator, entry, tracker_id, number)
             )
-            for tracker_id, _vehicle in vehicle_items
-            if tracker_id not in added_tracker_ids
-        ]
         if new_entities:
             added_tracker_ids.update(entity.tracker_id for entity in new_entities)
             async_add_entities(new_entities)
-
-    active_unique_ids = {
-        f"{entry.entry_id}_{tracker_id}"
-        for tracker_id, trip in coordinator.data.items()
-        if trip.get("vehicle_id")
-    }
-    assign_vehicle_numbers()
-    active_tracker_ids = {
-        tracker_id
-        for tracker_id, vehicle in coordinator.data.items()
-        if vehicle.get("vehicle_id")
-    }
-    for entity in tuple(registry.entities.values()):
-        if entity.config_entry_id != entry.entry_id or entity.platform != DOMAIN:
-            continue
-        if not entity.entity_id.startswith("device_tracker."):
-            continue
-        if entity.unique_id not in active_unique_ids:
-            registry.async_remove(entity.entity_id)
-            continue
-        tracker_id = entity.unique_id.removeprefix(f"{entry.entry_id}_")
-        vehicle_number = vehicle_numbers.get(tracker_id)
-        if tracker_id not in active_tracker_ids or vehicle_number is None:
-            continue
-        vehicle = coordinator.data[tracker_id]
-        suggested_object_id = _suggested_object_id(
-            entry, vehicle["student_id"], vehicle_number
-        )
-        desired_entity_id = f"device_tracker.{suggested_object_id}"
-        if entity.entity_id != desired_entity_id:
-            registry.async_update_entity(
-                entity.entity_id,
-                new_entity_id=desired_entity_id,
-            )
 
     entry.async_on_unload(coordinator.async_add_listener(add_new_vehicles))
     add_new_vehicles()
@@ -134,22 +93,26 @@ class EdulogVehicleTracker(CoordinatorEntity[EdulogCoordinator], TrackerEntity):
     """Represent the location of one expected vehicle."""
 
     _attr_has_entity_name = True
-    _attr_entity_category = None
     _attr_source_type = SourceType.GPS
 
     def __init__(
         self,
         coordinator: EdulogCoordinator,
-        entry: ConfigEntry,
+        entry: EdulogConfigEntry,
         tracker_id: str,
         vehicle_number: int,
     ) -> None:
         super().__init__(coordinator)
         vehicle = coordinator.data[tracker_id]
         self.tracker_id = tracker_id
-        self._attr_name = f"Vehicle {vehicle_number}"
-        self._attr_suggested_object_id = _suggested_object_id(
-            entry, vehicle["student_id"], vehicle_number
+        self._attr_name = f"{_VEHICLE_NAME_PREFIX}{vehicle_number}"
+        # Suggest a generic, account/student-scoped entity ID for new trackers
+        # so the child's name is not part of it. Home Assistant only uses this
+        # on first registration; afterwards the registry (and any ID the user
+        # chose) wins, so nothing here rewrites existing entities.
+        self.entity_id = (
+            f"{Platform.DEVICE_TRACKER}."
+            f"{_suggested_object_id(entry, vehicle['student_id'], vehicle_number)}"
         )
         self._attr_unique_id = f"{entry.entry_id}_{tracker_id}"
         self._attr_device_info = DeviceInfo(
@@ -211,7 +174,7 @@ class EdulogVehicleTracker(CoordinatorEntity[EdulogCoordinator], TrackerEntity):
 
 
 def _suggested_object_id(
-    entry: ConfigEntry, student_id: str, vehicle_number: int
+    entry: EdulogConfigEntry, student_id: str, vehicle_number: int
 ) -> str:
     """Return a stable, generic entity ID scoped to this account and student."""
     return slugify(

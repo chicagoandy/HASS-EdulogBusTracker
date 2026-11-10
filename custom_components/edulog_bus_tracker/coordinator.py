@@ -9,19 +9,23 @@ from datetime import date, datetime, time, timedelta, tzinfo
 from typing import Any
 
 import aiohttp
+from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryAuthFailed
-from homeassistant.helpers import issue_registry as ir
-from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
+from homeassistant.helpers.update_coordinator import (
+    DataUpdateCoordinator,
+    UpdateFailed,
+)
 from homeassistant.util import dt as dt_util
 
 from .api import EdulogApi, EdulogApiError, EdulogAuthError
 from .const import (
+    API_ERROR_BACKOFF_INITIAL,
+    API_ERROR_BACKOFF_MAX,
     DOMAIN,
     LOCATION_POLL_BACKOFF_INITIAL,
     LOCATION_POLL_BACKOFF_MAX,
     LOCATION_POLL_LEAD_TIME,
-    REAUTH_ISSUE_ID_PREFIX,
     SCAN_INTERVAL,
     STUDENT_LIST_REFRESH_INTERVAL,
     TRIP_SCHEDULE_REFRESH_INTERVAL,
@@ -33,17 +37,19 @@ _LOGGER = logging.getLogger(__name__)
 class EdulogCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
     """Fetch student assignments and their associated live vehicle locations."""
 
+    config_entry: ConfigEntry
+
     def __init__(
-        self, hass: HomeAssistant, api: EdulogApi, config_entry_id: str
+        self, hass: HomeAssistant, config_entry: ConfigEntry, api: EdulogApi
     ) -> None:
         super().__init__(
             hass,
             _LOGGER,
+            config_entry=config_entry,
             name=DOMAIN,
             update_interval=SCAN_INTERVAL,
         )
         self.api = api
-        self.config_entry_id = config_entry_id
         self._student_records: list[dict[str, Any]] | None = None
         self._last_student_refresh: datetime | None = None
         self._trip_lookups: list[dict[str, Any]] | None = None
@@ -59,36 +65,34 @@ class EdulogCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
         self._last_trip_polling_status: dict[str, bool] = {}
         self._unknown_trip_timezones: set[str] = set()
         self._initial_location_refresh_complete = False
+        self._api_refresh_failures = 0
 
     async def _async_update_data(self) -> dict[str, dict[str, Any]]:
         """Retrieve approved students, their trips, and latest bus positions."""
         try:
-            return await self._async_fetch_data()
+            data = await self._async_fetch_data()
         except EdulogAuthError as err:
-            _LOGGER.error(
-                "Edulog authentication failed; reauthentication is required: %s",
-                err,
-            )
-            ir.async_create_issue(
-                self.hass,
-                DOMAIN,
-                f"{REAUTH_ISSUE_ID_PREFIX}_{self.config_entry_id}",
-                is_fixable=False,
-                severity=ir.IssueSeverity.ERROR,
-                translation_key="reauthenticate",
-            )
+            # Home Assistant stops polling and starts the reauth flow.
             raise ConfigEntryAuthFailed(
                 "Edulog access token expired; sign in again."
             ) from err
-        except EdulogApiError as err:
-            _LOGGER.error("Edulog API data refresh failed: %s", err)
-            raise
-        except (aiohttp.ClientError, TimeoutError) as err:
-            _LOGGER.error(
-                "Could not connect to the Edulog API (%s)",
-                type(err).__name__,
+        except (EdulogApiError, aiohttp.ClientError, TimeoutError) as err:
+            # Back off between failed refreshes so an outage of the student or
+            # trip endpoints is not retried at the 5-second location cadence.
+            # The coordinator logs the UpdateFailed itself.
+            self._api_refresh_failures += 1
+            backoff_exponent = min(self._api_refresh_failures - 1, 5)
+            self.update_interval = min(
+                API_ERROR_BACKOFF_INITIAL * 2**backoff_exponent,
+                API_ERROR_BACKOFF_MAX,
             )
-            raise
+            raise UpdateFailed(
+                f"Edulog API request failed ({type(err).__name__}); retrying in "
+                f"{int(self.update_interval.total_seconds())} seconds"
+            ) from err
+        self._api_refresh_failures = 0
+        self.update_interval = SCAN_INTERVAL
+        return data
 
     async def _async_fetch_data(self) -> dict[str, dict[str, Any]]:
         """Fetch all student trips and their vehicle locations."""
@@ -102,7 +106,7 @@ class EdulogCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
         if student_list_refreshed:
             self._student_records = await self.api.async_get_students()
             self._last_student_refresh = now
-            _LOGGER.info(
+            _LOGGER.debug(
                 "Fetched %d student access requests",
                 len(self._student_records),
             )
@@ -133,6 +137,12 @@ class EdulogCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
                 "student_last_name": last_name,
             }
             trip_requests.append({"studentId": student_id, "tenantId": tenant_id})
+
+        # The API fetches trips one tenant at a time. Group the requests the
+        # same way, so the response order still matches the request order for
+        # records that omit their student ID.
+        tenant_order = list(dict.fromkeys(r["tenantId"] for r in trip_requests))
+        trip_requests.sort(key=lambda r: tenant_order.index(r["tenantId"]))
 
         if student_list_refreshed and incomplete_identifier_count:
             _LOGGER.warning(
@@ -177,7 +187,7 @@ class EdulogCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
             self._trip_lookups = await self.api.async_get_trips(trip_requests)
             self._last_trip_refresh = now
             self._last_trip_requests = trip_requests
-            _LOGGER.info(
+            _LOGGER.debug(
                 "Received %d trip schedule records",
                 len(self._trip_lookups),
             )
@@ -371,7 +381,7 @@ class EdulogCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
                     len(approved_students),
                 )
             else:
-                _LOGGER.info(
+                _LOGGER.debug(
                     "Prepared %d vehicle trackers for %d approved students",
                     sum(
                         tracker.get("vehicle_id") is not None
@@ -465,7 +475,8 @@ class EdulogCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
                 self._vehicle_poll_failures.pop(vehicle, None)
                 self._vehicle_retry_after.pop(vehicle, None)
             else:
-                self._vehicle_locations.pop(vehicle, None)
+                # Keep the last known position; the telemetry health sensor
+                # reports that it is stale until a request succeeds again.
                 self._vehicle_telemetry_health[vehicle] = "stale"
         if vehicles_to_refresh:
             locations_received = sum(
