@@ -12,6 +12,7 @@ from homeassistant.helpers.entity_registry import (
     async_get as async_get_entity_registry,
 )
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.helpers.storage import Store
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from homeassistant.util import slugify
 
@@ -30,8 +31,27 @@ async def async_setup_entry(
     registry = async_get_entity_registry(hass)
     vehicle_numbers: dict[str, int] = {}
     next_number_by_student: dict[str, int] = {}
+    number_store: Store[dict[str, dict[str, str | int]]] = Store(
+        hass, 1, f"{DOMAIN}_vehicle_numbers_{entry.entry_id}"
+    )
+    stored_numbers = await number_store.async_load()
+    number_assignments: dict[str, tuple[str, int]] = {}
+    if isinstance(stored_numbers, dict):
+        for tracker_id, assignment in stored_numbers.items():
+            if not isinstance(tracker_id, str) or not isinstance(assignment, dict):
+                continue
+            student_id = assignment.get("student_id")
+            number = assignment.get("number")
+            if (
+                isinstance(student_id, str)
+                and isinstance(number, int)
+                and not isinstance(number, bool)
+                and number > 0
+            ):
+                number_assignments[tracker_id] = (student_id, number)
 
     def assign_vehicle_numbers() -> list[tuple[str, dict[str, Any]]]:
+        assignments_changed = False
         vehicle_items = sorted(
             (
                 (tracker_id, vehicle)
@@ -44,39 +64,80 @@ async def async_setup_entry(
                 item[1]["vehicle_id"],
             ),
         )
+        used_numbers_by_student: dict[str, set[int]] = {}
+        for student_id, number in number_assignments.values():
+            used_numbers_by_student.setdefault(student_id, set()).add(number)
+
         vehicles_by_unique_id = {
             f"{entry.entry_id}_{tracker_id}": (tracker_id, vehicle)
             for tracker_id, vehicle in vehicle_items
         }
         for entity in registry.entities.values():
+            if (
+                entity.config_entry_id != entry.entry_id
+                or entity.platform != DOMAIN
+            ):
+                continue
             vehicle_match = vehicles_by_unique_id.get(entity.unique_id)
             if vehicle_match is None:
                 continue
             tracker_id, vehicle = vehicle_match
+            if tracker_id in number_assignments:
+                continue
             object_id_prefix = _suggested_object_id(
                 entry, vehicle["student_id"], 1
             ).rsplit("_vehicle_", 1)[0]
             entity_id_prefix = f"device_tracker.{object_id_prefix}_vehicle_"
-            if not entity.entity_id.startswith(entity_id_prefix):
-                continue
             suffix = entity.entity_id.removeprefix(entity_id_prefix)
-            if not suffix.isdecimal():
-                continue
-            number = int(suffix)
-            if number > 0:
-                vehicle_numbers[tracker_id] = number
-                student_id = vehicle["student_id"]
+            number = int(suffix) if suffix.isdecimal() else 0
+            if not number:
+                original_name = getattr(entity, "original_name", None)
+                name = original_name or entity.name
+                if not isinstance(name, str) or not name.startswith("Vehicle "):
+                    continue
+                suffix = name.removeprefix("Vehicle ")
+                if not suffix.isdecimal():
+                    continue
+                number = int(suffix)
+            student_id = vehicle["student_id"]
+            used_numbers = used_numbers_by_student.setdefault(student_id, set())
+            if number > 0 and number not in used_numbers:
+                number_assignments[tracker_id] = (student_id, number)
+                used_numbers.add(number)
+                assignments_changed = True
                 next_number_by_student[student_id] = max(
                     next_number_by_student.get(student_id, 0), number
                 )
 
         for tracker_id, vehicle in vehicle_items:
-            if tracker_id in vehicle_numbers:
+            assignment = number_assignments.get(tracker_id)
+            if (
+                assignment is not None
+                and assignment[0] == vehicle["student_id"]
+            ):
+                vehicle_numbers[tracker_id] = assignment[1]
                 continue
             student_id = vehicle["student_id"]
+            used_numbers = used_numbers_by_student.setdefault(student_id, set())
             number = next_number_by_student.get(student_id, 0) + 1
+            while number in used_numbers:
+                number += 1
+            number_assignments[tracker_id] = (student_id, number)
+            used_numbers.add(number)
             vehicle_numbers[tracker_id] = number
             next_number_by_student[student_id] = number
+            assignments_changed = True
+        if assignments_changed:
+            assignments_to_save = {
+                key: {
+                    "student_id": assignment[0],
+                    "number": assignment[1],
+                }
+                for key, assignment in number_assignments.items()
+            }
+            hass.async_create_task(
+                number_store.async_save(assignments_to_save)
+            )
         return vehicle_items
 
     def add_new_vehicles() -> None:
@@ -91,40 +152,6 @@ async def async_setup_entry(
         if new_entities:
             added_tracker_ids.update(entity.tracker_id for entity in new_entities)
             async_add_entities(new_entities)
-
-    active_unique_ids = {
-        f"{entry.entry_id}_{tracker_id}"
-        for tracker_id, trip in coordinator.data.items()
-        if trip.get("vehicle_id")
-    }
-    assign_vehicle_numbers()
-    active_tracker_ids = {
-        tracker_id
-        for tracker_id, vehicle in coordinator.data.items()
-        if vehicle.get("vehicle_id")
-    }
-    for entity in tuple(registry.entities.values()):
-        if entity.config_entry_id != entry.entry_id or entity.platform != DOMAIN:
-            continue
-        if not entity.entity_id.startswith("device_tracker."):
-            continue
-        if entity.unique_id not in active_unique_ids:
-            registry.async_remove(entity.entity_id)
-            continue
-        tracker_id = entity.unique_id.removeprefix(f"{entry.entry_id}_")
-        vehicle_number = vehicle_numbers.get(tracker_id)
-        if tracker_id not in active_tracker_ids or vehicle_number is None:
-            continue
-        vehicle = coordinator.data[tracker_id]
-        suggested_object_id = _suggested_object_id(
-            entry, vehicle["student_id"], vehicle_number
-        )
-        desired_entity_id = f"device_tracker.{suggested_object_id}"
-        if entity.entity_id != desired_entity_id:
-            registry.async_update_entity(
-                entity.entity_id,
-                new_entity_id=desired_entity_id,
-            )
 
     entry.async_on_unload(coordinator.async_add_listener(add_new_vehicles))
     add_new_vehicles()

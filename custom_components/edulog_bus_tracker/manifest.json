@@ -5,8 +5,8 @@
   "codeowners": ["@chicagoandy"],
   "config_flow": true,
   "dependencies": ["zone"],
-  "documentation": "https://github.com/chicagoandy/HASSEdulogBusTracker",
+  "documentation": "https://github.com/chicagoandy/HASS-EdulogBusTracker",
   "iot_class": "cloud_polling",
-  "issue_tracker": "https://github.com/chicagoandy/HASSEdulogBusTracker/issues",
-  "version": "1.0.0-beta.1"
+  "issue_tracker": "https://github.com/chicagoandy/HASS-EdulogBusTracker/issues",
+  "version": "1.5"
 }

@@ -13,11 +13,16 @@ import aiohttp
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryAuthFailed
 from homeassistant.helpers import issue_registry as ir
-from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
+from homeassistant.helpers.update_coordinator import (
+    DataUpdateCoordinator,
+    UpdateFailed,
+)
 from homeassistant.util import dt as dt_util
 
 from .api import EdulogApi, EdulogApiError, EdulogAuthError
 from .const import (
+    API_ERROR_BACKOFF_INITIAL,
+    API_ERROR_BACKOFF_MAX,
     DOMAIN,
     FAST_SCAN_INTERVAL,
     LOCATION_POLL_BACKOFF_INITIAL,
@@ -70,11 +75,12 @@ class EdulogCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
         self._last_trip_polling_status: dict[str, bool] = {}
         self._unknown_trip_timezones: set[str] = set()
         self._initial_location_refresh_complete = False
+        self._api_refresh_failures = 0
 
     async def _async_update_data(self) -> dict[str, dict[str, Any]]:
         """Retrieve approved students, their trips, and latest bus positions."""
         try:
-            return await self._async_fetch_data()
+            data = await self._async_fetch_data()
         except EdulogAuthError as err:
             _LOGGER.error(
                 "Edulog authentication failed; reauthentication is required: %s",
@@ -91,15 +97,27 @@ class EdulogCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
             raise ConfigEntryAuthFailed(
                 "Edulog access token expired; sign in again."
             ) from err
-        except EdulogApiError as err:
-            _LOGGER.error("Edulog API data refresh failed: %s", err)
-            raise
-        except (aiohttp.ClientError, TimeoutError) as err:
-            _LOGGER.error(
-                "Could not connect to the Edulog API (%s)",
-                type(err).__name__,
+        except (EdulogApiError, aiohttp.ClientError, TimeoutError) as err:
+            # Keep transient API failures inside the coordinator's normal error
+            # flow, and slow retries down without treating bad credentials as
+            # a recoverable connection problem.
+            self._api_refresh_failures += 1
+            retry_after = min(
+                API_ERROR_BACKOFF_INITIAL.total_seconds()
+                * 2 ** min(self._api_refresh_failures - 1, 5),
+                API_ERROR_BACKOFF_MAX.total_seconds(),
             )
-            raise
+            _LOGGER.error(
+                "Edulog API data refresh failed (%s); retrying in %d seconds",
+                type(err).__name__,
+                int(retry_after),
+            )
+            raise UpdateFailed(
+                "Edulog API data refresh failed.",
+                retry_after=retry_after,
+            ) from err
+        self._api_refresh_failures = 0
+        return data
 
     async def _async_fetch_data(self) -> dict[str, dict[str, Any]]:
         """Fetch all student trips and their vehicle locations."""
@@ -107,6 +125,8 @@ class EdulogCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
             raise EdulogAuthError("Edulog account ID is missing.")
 
         now = dt_util.now()
+        # Cache the approved-student list for a day; a failed fetch leaves its
+        # refresh timestamp unchanged, so the next coordinator retry tries again.
         student_list_refreshed = _refresh_due(
             self._last_student_refresh, now, STUDENT_LIST_REFRESH_INTERVAL
         )
@@ -174,6 +194,8 @@ class EdulogCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
             self.update_interval = SCAN_INTERVAL
             return {}
 
+        # Trip data changes less often than live locations. Refresh it hourly,
+        # or immediately when the approved students being queried change.
         refresh_trip_schedule = (
             _refresh_due(
                 self._last_trip_refresh,
@@ -197,6 +219,8 @@ class EdulogCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
 
         trip_lookups = self._trip_lookups or []
         student_ids = [request["studentId"] for request in trip_requests]
+        # Trackers are keyed by vehicle, so trips sharing a bus share one
+        # location request. Keep trip-specific stop data for zones and polling.
         trackers: dict[str, dict[str, Any]] = {}
         requests_by_vehicle: dict[tuple[str, str], list[str]] = {}
         zone_definitions: dict[str, tuple[str, float, float]] = {}
@@ -233,6 +257,8 @@ class EdulogCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
 
         for index, lookup in enumerate(trip_lookups):
             student = lookup.get("student")
+            # Responses normally identify their student. Use request order only
+            # when the response omits that ID and both lists align one-to-one.
             student_id = (
                 _string(student.get("studentId"))
                 if isinstance(student, Mapping)
@@ -317,6 +343,8 @@ class EdulogCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
                 active_trip_count += polling_active
                 vehicle = (vehicle_id, tenant_id)
                 if polling_active:
+                    # Only active trips contribute geofences to the fast-polling
+                    # decision; a future or completed trip must not speed up a bus.
                     coordinates = [
                         stop_coordinates
                         for stop in (
@@ -358,6 +386,8 @@ class EdulogCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
                         tracker_id
                     )
                 else:
+                    # A shared bus is considered active if any attached trip is
+                    # active, and advertises the earliest upcoming trip start.
                     existing_tracker["trip_names"].append(trip_name)
                     existing_tracker["trips"].append(trip_details)
                     existing_tracker["polling_active"] |= polling_active
@@ -423,6 +453,8 @@ class EdulogCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
                     len(approved_students),
                 )
 
+        # Synchronize map zones from the complete schedule before polling. This
+        # also removes zones for stops that disappeared from the latest schedule.
         await self.zones.async_sync(zone_definitions)
 
         semaphore = asyncio.Semaphore(5)
@@ -431,6 +463,8 @@ class EdulogCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
             vehicle: tuple[str, str],
         ) -> tuple[dict[str, Any] | None, Exception | None]:
             vehicle_id, tenant_id = vehicle
+            # Limit concurrent API calls while handling location failures per
+            # vehicle, so one bad bus does not block the rest of the refresh.
             async with semaphore:
                 try:
                     return (
@@ -460,6 +494,8 @@ class EdulogCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
                     return None, err
 
         def get_vehicle_intervals() -> dict[tuple[str, str], timedelta]:
+            # The last known bus position determines whether an active vehicle
+            # needs the normal cadence or the faster stop-zone cadence.
             return {
                 vehicle: (
                     FAST_SCAN_INTERVAL
@@ -478,6 +514,9 @@ class EdulogCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
             }
 
         vehicle_intervals = get_vehicle_intervals()
+        # Make one startup request for every assigned bus to initialize its
+        # tracker. Later requests are limited to active trips whose interval is
+        # due and whose per-vehicle error backoff has expired.
         vehicles_to_refresh = [
             vehicle
             for vehicle in requests_by_vehicle
@@ -524,6 +563,8 @@ class EdulogCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
                 self._vehicle_locations.pop(vehicle, None)
                 self._vehicle_telemetry_health[vehicle] = "stale"
         vehicle_intervals = get_vehicle_intervals()
+        # Run the coordinator at the fastest active vehicle cadence so it can
+        # detect zone entry promptly; each bus still has its own due-time gate.
         self.update_interval = min(
             vehicle_intervals.values(), default=SCAN_INTERVAL
         )
@@ -540,6 +581,8 @@ class EdulogCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
             )
 
         for vehicle, tracker_ids in requests_by_vehicle.items():
+            # Publish cached positions and the next eligible request time on
+            # every tracker that shares this vehicle.
             location = self._vehicle_locations.get(vehicle)
             interval = vehicle_intervals.get(vehicle)
             last_refresh = self._last_vehicle_refresh.get(vehicle)
@@ -585,6 +628,7 @@ def _field(record: Mapping[str, Any], name: str) -> Any:
 
 
 def _coordinates(record: Any) -> tuple[float, float] | None:
+    """Parse only finite, in-range latitude/longitude pairs."""
     if not isinstance(record, Mapping):
         return None
     latitude = _field(record, "latitude")
@@ -699,6 +743,8 @@ def _trip_is_active(
     if pickup is None or dropoff is None:
         return False
 
+    # API timestamps may include dates while some schedules provide only times.
+    # Normalize both forms into comparable datetimes, including overnight trips.
     if isinstance(pickup, datetime) and isinstance(dropoff, datetime):
         return pickup - LOCATION_POLL_LEAD_TIME <= now < dropoff
 
@@ -763,6 +809,7 @@ def _next_polling_start_time(
 def _parse_schedule_value(
     value: Any, timezone: tzinfo, now: datetime
 ) -> datetime | time | None:
+    """Accept ISO timestamps and common clock-time formats from trip data."""
     if not isinstance(value, str):
         return None
     text = value.strip()

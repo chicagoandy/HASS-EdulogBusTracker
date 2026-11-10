@@ -27,7 +27,7 @@ Install **Edulog Bus Tracker** through HACS, or copy
 
 To install through HACS before it is listed in the default store, go to
 **HACS > Integrations > menu > Custom repositories**, add
-`https://github.com/chicagoandy/HASSEdulogBusTracker`, and choose **Integration**.
+`https://github.com/chicagoandy/HASS-EdulogBusTracker`, and choose **Integration**.
 
 ## Setup
 
@@ -60,6 +60,9 @@ polling. When trips share a vehicle, it is polled once per vehicle using the
 fastest interval needed by any active trip.
 Vehicle-location API errors trigger per-vehicle exponential backoff, starting
 at 1 minute and capped at 5 minutes; a successful request resets the backoff.
+Student-list and trip-schedule API errors also raise a coordinator update
+failure and back off exponentially from 1 minute to a 5-minute cap. A successful
+coordinator refresh resets that backoff.
 Authentication failures still trigger reauthentication immediately.
 The approved student list is fetched at startup and refreshed daily. Trip
 schedules are fetched at startup and refreshed hourly, or sooner if the
