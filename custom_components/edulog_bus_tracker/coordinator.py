@@ -329,6 +329,8 @@ class EdulogCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
                             *coordinates,
                         )
                 vehicle_id = _string(trip.get("vehicleId"))
+                # Keep the stop zones above even when no bus is assigned, but
+                # skip location tracking because there is no vehicle to query.
                 if not vehicle_id:
                     continue
                 tenant_id = approved_students[student_id]["tenant_id"]
