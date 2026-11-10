@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from math import isfinite
 
 import aiohttp
 from homeassistant.config_entries import ConfigEntry
@@ -12,8 +13,13 @@ from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .api import EdulogApi, EdulogHttpError
-from .const import DOMAIN
+from .const import (
+    CONF_ZONE_DIAMETER_MILES,
+    DEFAULT_ZONE_DIAMETER_MILES,
+    DOMAIN,
+)
 from .coordinator import EdulogCoordinator
+from .zones import EdulogZones
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -41,7 +47,29 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         refresh_token=entry.data.get("refresh_token"),
         token_update_callback=update_tokens,
     )
-    coordinator = EdulogCoordinator(hass, api, entry.entry_id)
+    zone_diameter_miles = entry.options.get(
+        CONF_ZONE_DIAMETER_MILES, DEFAULT_ZONE_DIAMETER_MILES
+    )
+    if (
+        isinstance(zone_diameter_miles, bool)
+        or not isinstance(zone_diameter_miles, (int, float))
+        or not isfinite(zone_diameter_miles)
+        or zone_diameter_miles <= 0
+    ):
+        raise ConfigEntryNotReady(
+            "The configured pickup/drop-off zone diameter must be positive."
+        )
+    zones = EdulogZones(
+        hass, entry.entry_id, float(zone_diameter_miles)
+    )
+    await zones.async_load()
+    coordinator = EdulogCoordinator(
+        hass,
+        api,
+        entry.entry_id,
+        float(zone_diameter_miles),
+        zones,
+    )
     try:
         await coordinator.async_config_entry_first_refresh()
     except ConfigEntryAuthFailed:
@@ -61,6 +89,15 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         return False
     hass.data[DOMAIN].pop(entry.entry_id, None)
     return True
+
+
+async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """Remove pickup and drop-off zones created by this entry."""
+    zones = EdulogZones(
+        hass, entry.entry_id, DEFAULT_ZONE_DIAMETER_MILES
+    )
+    await zones.async_load()
+    await zones.async_remove_owned_zones()
 
 
 async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:

@@ -29,6 +29,17 @@
       "reauth_entry_not_found": "The Edulog configuration entry could not be found."
     }
   },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Polling geofence",
+        "description": "Set the diameter around each trip's pickup and drop-off points that triggers faster bus location polling. Map-visible passive Home Assistant zones are created for these points.",
+        "data": {
+          "zone_diameter_miles": "Pickup/drop-off zone diameter (miles)"
+        }
+      }
+    }
+  },
   "issues": {
     "reauthenticate": {
       "title": "Edulog sign-in required",

@@ -6,6 +6,7 @@ import asyncio
 import logging
 from collections.abc import Mapping
 from datetime import date, datetime, time, timedelta, tzinfo
+from math import asin, cos, isfinite, radians, sin, sqrt
 from typing import Any
 
 import aiohttp
@@ -18,14 +19,17 @@ from homeassistant.util import dt as dt_util
 from .api import EdulogApi, EdulogApiError, EdulogAuthError
 from .const import (
     DOMAIN,
+    FAST_SCAN_INTERVAL,
     LOCATION_POLL_BACKOFF_INITIAL,
     LOCATION_POLL_BACKOFF_MAX,
     LOCATION_POLL_LEAD_TIME,
+    METERS_PER_MILE,
     REAUTH_ISSUE_ID_PREFIX,
     SCAN_INTERVAL,
     STUDENT_LIST_REFRESH_INTERVAL,
     TRIP_SCHEDULE_REFRESH_INTERVAL,
 )
+from .zones import EdulogZones
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -34,7 +38,12 @@ class EdulogCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
     """Fetch student assignments and their associated live vehicle locations."""
 
     def __init__(
-        self, hass: HomeAssistant, api: EdulogApi, config_entry_id: str
+        self,
+        hass: HomeAssistant,
+        api: EdulogApi,
+        config_entry_id: str,
+        zone_diameter_miles: float,
+        zones: EdulogZones,
     ) -> None:
         super().__init__(
             hass,
@@ -44,6 +53,8 @@ class EdulogCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
         )
         self.api = api
         self.config_entry_id = config_entry_id
+        self.zones = zones
+        self._zone_radius_meters = zone_diameter_miles * METERS_PER_MILE / 2
         self._student_records: list[dict[str, Any]] | None = None
         self._last_student_refresh: datetime | None = None
         self._trip_lookups: list[dict[str, Any]] | None = None
@@ -159,6 +170,8 @@ class EdulogCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
             self._trip_lookups = []
             self._last_trip_requests = []
             self._last_trip_refresh = now
+            await self.zones.async_sync({})
+            self.update_interval = SCAN_INTERVAL
             return {}
 
         refresh_trip_schedule = (
@@ -186,6 +199,10 @@ class EdulogCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
         student_ids = [request["studentId"] for request in trip_requests]
         trackers: dict[str, dict[str, Any]] = {}
         requests_by_vehicle: dict[tuple[str, str], list[str]] = {}
+        zone_definitions: dict[str, tuple[str, float, float]] = {}
+        active_stop_coordinates: dict[
+            tuple[str, str], list[tuple[float, float]]
+        ] = {}
         matched_students: set[str] = set()
         students_with_vehicles: set[str] = set()
         assigned_trip_count = 0
@@ -264,12 +281,6 @@ class EdulogCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
                     or _string(trip.get("id"))
                     or f"trip_{trip_index + 1}"
                 )
-                vehicle_id = _string(trip.get("vehicleId"))
-                if not vehicle_id:
-                    continue
-                tenant_id = approved_students[student_id]["tenant_id"]
-                tracker_id = f"{student_id}_vehicle_{tenant_id}_{vehicle_id}"
-                polling_status_key = f"{tracker_id}_{trip_id}_{trip_index}"
                 trip_name = next(
                     (
                         value
@@ -278,6 +289,25 @@ class EdulogCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
                     ),
                     f"Trip {trip_index + 1}",
                 )
+                for stop_key, stop_kind in (
+                    ("pickup", "Pickup"),
+                    ("dropoff", "Drop-off"),
+                ):
+                    coordinates = _coordinates(_field(trip, stop_key))
+                    if coordinates is not None:
+                        zone_definitions[
+                            f"{student_id}:{trip_id}:{stop_kind}"
+                        ] = (
+                            f"{approved_students[student_id]['name']} - "
+                            f"{trip_name} {stop_kind}",
+                            *coordinates,
+                        )
+                vehicle_id = _string(trip.get("vehicleId"))
+                if not vehicle_id:
+                    continue
+                tenant_id = approved_students[student_id]["tenant_id"]
+                tracker_id = f"{student_id}_vehicle_{tenant_id}_{vehicle_id}"
+                polling_status_key = f"{tracker_id}_{trip_id}_{trip_index}"
                 route_start_time = _first_route_stop_time(trip)
                 pickup_time = _nested_field(trip, ("pickup", "time"))
                 dropoff_time = _nested_field(trip, ("dropoff", "time"))
@@ -285,6 +315,19 @@ class EdulogCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
                     trip, now, trip_timezone
                 )
                 active_trip_count += polling_active
+                vehicle = (vehicle_id, tenant_id)
+                if polling_active:
+                    coordinates = [
+                        stop_coordinates
+                        for stop in (
+                            _field(trip, "pickup"),
+                            _field(trip, "dropoff"),
+                        )
+                        if (stop_coordinates := _coordinates(stop)) is not None
+                    ]
+                    active_stop_coordinates.setdefault(vehicle, []).extend(
+                        coordinates
+                    )
                 next_poll_start = (
                     _next_polling_start_time(trip, now, trip_timezone)
                     if vehicle_id and not polling_active
@@ -311,9 +354,9 @@ class EdulogCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
                             "student_last_name"
                         ],
                     }
-                    requests_by_vehicle.setdefault(
-                        (vehicle_id, tenant_id), []
-                    ).append(tracker_id)
+                    requests_by_vehicle.setdefault(vehicle, []).append(
+                        tracker_id
+                    )
                 else:
                     existing_tracker["trip_names"].append(trip_name)
                     existing_tracker["trips"].append(trip_details)
@@ -380,6 +423,8 @@ class EdulogCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
                     len(approved_students),
                 )
 
+        await self.zones.async_sync(zone_definitions)
+
         semaphore = asyncio.Semaphore(5)
 
         async def fetch_location(
@@ -414,14 +459,25 @@ class EdulogCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
                     )
                     return None, err
 
-        vehicle_intervals = {
-            vehicle: SCAN_INTERVAL
-            for vehicle, tracker_ids in requests_by_vehicle.items()
-            if any(
-                trackers[tracker_id]["polling_active"]
-                for tracker_id in tracker_ids
-            )
-        }
+        def get_vehicle_intervals() -> dict[tuple[str, str], timedelta]:
+            return {
+                vehicle: (
+                    FAST_SCAN_INTERVAL
+                    if _location_is_near_stop(
+                        self._vehicle_locations.get(vehicle),
+                        active_stop_coordinates.get(vehicle, []),
+                        self._zone_radius_meters,
+                    )
+                    else SCAN_INTERVAL
+                )
+                for vehicle, tracker_ids in requests_by_vehicle.items()
+                if any(
+                    trackers[tracker_id]["polling_active"]
+                    for tracker_id in tracker_ids
+                )
+            }
+
+        vehicle_intervals = get_vehicle_intervals()
         vehicles_to_refresh = [
             vehicle
             for vehicle in requests_by_vehicle
@@ -467,6 +523,10 @@ class EdulogCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
             else:
                 self._vehicle_locations.pop(vehicle, None)
                 self._vehicle_telemetry_health[vehicle] = "stale"
+        vehicle_intervals = get_vehicle_intervals()
+        self.update_interval = min(
+            vehicle_intervals.values(), default=SCAN_INTERVAL
+        )
         if vehicles_to_refresh:
             locations_received = sum(
                 location is not None and error is None
@@ -495,6 +555,9 @@ class EdulogCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
                 trackers[tracker_id]["telemetry_health"] = (
                     self._vehicle_telemetry_health.get(vehicle, "unknown")
                 )
+                trackers[tracker_id]["polling_interval"] = (
+                    interval or SCAN_INTERVAL
+                ).total_seconds()
                 if next_location_poll is not None:
                     trackers[tracker_id]["next_location_poll"] = next_location_poll
 
@@ -519,6 +582,53 @@ def _field(record: Mapping[str, Any], name: str) -> Any:
         (value for key, value in record.items() if key.casefold() == normalized_name),
         None,
     )
+
+
+def _coordinates(record: Any) -> tuple[float, float] | None:
+    if not isinstance(record, Mapping):
+        return None
+    latitude = _field(record, "latitude")
+    longitude = _field(record, "longitude")
+    if isinstance(latitude, bool) or isinstance(longitude, bool):
+        return None
+    try:
+        latitude_value = float(latitude)
+        longitude_value = float(longitude)
+    except (OverflowError, TypeError, ValueError):
+        return None
+    if (
+        not isfinite(latitude_value)
+        or not -90 <= latitude_value <= 90
+        or not isfinite(longitude_value)
+        or not -180 <= longitude_value <= 180
+    ):
+        return None
+    return latitude_value, longitude_value
+
+
+def _location_is_near_stop(
+    location: Mapping[str, Any] | None,
+    stops: list[tuple[float, float]],
+    radius_meters: float,
+) -> bool:
+    """Check whether a bus location falls inside any configured stop geofence."""
+    vehicle_coordinates = _coordinates(location)
+    if vehicle_coordinates is None:
+        return False
+    latitude, longitude = vehicle_coordinates
+    for stop_latitude, stop_longitude in stops:
+        latitude_delta = radians(stop_latitude - latitude)
+        longitude_delta = radians(stop_longitude - longitude)
+        haversine = (
+            sin(latitude_delta / 2) ** 2
+            + cos(radians(latitude))
+            * cos(radians(stop_latitude))
+            * sin(longitude_delta / 2) ** 2
+        )
+        distance_meters = 2 * 6_371_000 * asin(min(1.0, sqrt(haversine)))
+        if distance_meters <= radius_meters:
+            return True
+    return False
 
 
 def _trip_attributes(trip: Mapping[str, Any]) -> dict[str, Any]:

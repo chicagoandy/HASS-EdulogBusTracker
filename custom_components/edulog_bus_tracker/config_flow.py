@@ -7,14 +7,20 @@ from typing import Any
 import aiohttp
 import voluptuous as vol
 from homeassistant import config_entries
+from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_PASSWORD, CONF_USERNAME
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.data_entry_flow import FlowResult
 from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .api import EdulogApi, EdulogAuthError, EdulogHttpError
-from .const import DOMAIN, REAUTH_ISSUE_ID_PREFIX
+from .const import (
+    CONF_ZONE_DIAMETER_MILES,
+    DEFAULT_ZONE_DIAMETER_MILES,
+    DOMAIN,
+    REAUTH_ISSUE_ID_PREFIX,
+)
 
 
 async def _get_auth_token(
@@ -43,6 +49,12 @@ class EdulogConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Handle a config flow for Edulog Bus Tracker."""
 
     VERSION = 4
+
+    @staticmethod
+    @callback
+    def async_get_options_flow(config_entry: ConfigEntry) -> EdulogOptionsFlow:
+        """Create the options flow."""
+        return EdulogOptionsFlow()
 
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
@@ -130,6 +142,32 @@ class EdulogConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             step_id="reauth_confirm",
             data_schema=_credentials_schema(),
             errors=errors,
+        )
+
+
+class EdulogOptionsFlow(config_entries.OptionsFlowWithReload):
+    """Manage polling geofence options."""
+
+    async def async_step_init(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Configure the pickup and drop-off geofence diameter."""
+        if user_input is not None:
+            return self.async_create_entry(data=user_input)
+
+        schema = vol.Schema(
+            {
+                vol.Required(
+                    CONF_ZONE_DIAMETER_MILES,
+                    default=DEFAULT_ZONE_DIAMETER_MILES,
+                ): vol.All(vol.Coerce(float), vol.Range(min=0.01))
+            }
+        )
+        return self.async_show_form(
+            step_id="init",
+            data_schema=self.add_suggested_values_to_schema(
+                schema, self.config_entry.options
+            ),
         )
 
 

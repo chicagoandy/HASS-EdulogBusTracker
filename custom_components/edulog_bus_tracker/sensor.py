@@ -150,8 +150,18 @@ class EdulogVehiclePollingIntervalSensor(EdulogVehicleDiagnosticSensor):
 
     @property
     def native_value(self) -> float:
-        """Return the configured location polling interval in seconds."""
-        return SCAN_INTERVAL.total_seconds()
+        """Return the current location polling interval in seconds."""
+        interval = next(
+            (
+                trip.get("polling_interval")
+                for trip in self.coordinator.data.values()
+                if trip["tenant_id"] == self.tenant_id
+                and trip["vehicle_id"] == self.vehicle_id
+                and isinstance(trip.get("polling_interval"), (int, float))
+            ),
+            SCAN_INTERVAL.total_seconds(),
+        )
+        return float(interval)
 
 
 class EdulogVehicleNextPollSensor(EdulogVehicleDiagnosticSensor):

@@ -43,22 +43,27 @@ you to reauthenticate when their access token can no longer be used.
 
 ## Polling and behavior
 
-Home Assistant checks the integration for updates every 5 seconds; this is not
-the interval for every API request. On each check, it evaluates active trip
-windows using the cached trip schedules. At startup, it makes one location
+Home Assistant checks the integration for updates every minute by default; this
+is not the interval for every API request. On each check, it evaluates active
+trip windows using cached trip schedules. At startup, it makes one location
 request for each assigned vehicle to initialize tracker entities, even if the
 trip is not yet in its polling window. After startup, vehicle locations are
-refreshed every 5 seconds only for vehicles tied to a trip from 30 minutes
-before that route's first stop through the trip's drop-off time. If trips share
-a vehicle, it is polled once per vehicle while any associated trip is in its
-polling window. Vehicle-location API errors trigger per-vehicle exponential
-backoff, starting at 10 seconds and capped at 5 minutes; a successful request
-resets the backoff. Authentication failures still trigger reauthentication
-immediately.
+refreshed for trips from 30 minutes before the first route stop through
+drop-off. While a bus is within the configured zone around its pickup or
+drop-off point, its location is polled every 5 seconds; otherwise it is polled
+every minute. The zone diameter defaults to 2 miles (a 1-mile radius) and can
+be changed in the integration's options. The integration creates map-visible,
+passive Home Assistant zones for each pickup and drop-off with valid
+coordinates. These zones are managed by the integration and removed when it is
+deleted. If neither stop has coordinates, the trip continues to use one-minute
+polling. When trips share a vehicle, it is polled once per vehicle using the
+fastest interval needed by any active trip.
+Vehicle-location API errors trigger per-vehicle exponential backoff, starting
+at 1 minute and capped at 5 minutes; a successful request resets the backoff.
+Authentication failures still trigger reauthentication immediately.
 The approved student list is fetched at startup and refreshed daily. Trip
 schedules are fetched at startup and refreshed hourly, or sooner if the
-approved student list changes. Thus, student and trip endpoints are not called
-every 5 seconds. Trip times are evaluated in the
+approved student list changes. Trip times are evaluated in the
 timezone returned with each trip schedule; if the API omits or provides an
 unknown timezone, Home Assistant's configured timezone is used. Students without an
 assigned vehicle do not get a location tracker.
@@ -74,7 +79,8 @@ pickup time is used as the start reference. Trips sharing a vehicle therefore
 share one sensor per student, and it reflects the vehicle's actual polling
 state.
 Each distinct vehicle assigned to a student has one **Location polling
-interval** diagnostic sensor, which always reports 5 seconds, and one **Next
+interval** diagnostic sensor, which reports its current interval (60 or 5
+seconds), and one **Next
 eligible location poll** timestamp sensor. Their `vehicle_id` attributes
 identify the vehicle. For a shared vehicle, the timestamp reports the earliest
 next poll across all trips using the vehicle: the upcoming polling-window

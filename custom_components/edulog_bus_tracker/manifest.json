@@ -4,6 +4,7 @@
   "categories": ["vehicles_transport"],
   "codeowners": ["@chicagoandy"],
   "config_flow": true,
+  "dependencies": ["zone"],
   "documentation": "https://github.com/chicagoandy/HASSEdulogBusTracker",
   "iot_class": "cloud_polling",
   "issue_tracker": "https://github.com/chicagoandy/HASSEdulogBusTracker/issues",
