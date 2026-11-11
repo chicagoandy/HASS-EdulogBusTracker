@@ -9,24 +9,24 @@ from homeassistant.components.sensor import (
     SensorEntity,
     SensorStateClass,
 )
-from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import EntityCategory, UnitOfTime
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
+from . import EdulogConfigEntry
 from .const import DOMAIN, SCAN_INTERVAL
 from .coordinator import EdulogCoordinator
 
 
 async def async_setup_entry(
     hass: HomeAssistant,
-    entry: ConfigEntry,
+    entry: EdulogConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     """Set up diagnostics for each student vehicle."""
-    coordinator: EdulogCoordinator = hass.data[DOMAIN][entry.entry_id]
+    coordinator = entry.runtime_data
     added_vehicle_keys: set[tuple[str, str, str]] = set()
 
     def add_new_diagnostics() -> None:
@@ -73,7 +73,7 @@ class EdulogVehicleDiagnosticSensor(
     def __init__(
         self,
         coordinator: EdulogCoordinator,
-        entry: ConfigEntry,
+        entry: EdulogConfigEntry,
         student_id: str,
         tenant_id: str,
         vehicle_id: str,
@@ -128,7 +128,7 @@ class EdulogVehiclePollingIntervalSensor(EdulogVehicleDiagnosticSensor):
     def __init__(
         self,
         coordinator: EdulogCoordinator,
-        entry: ConfigEntry,
+        entry: EdulogConfigEntry,
         student_id: str,
         tenant_id: str,
         vehicle_id: str,
@@ -162,7 +162,7 @@ class EdulogVehicleNextPollSensor(EdulogVehicleDiagnosticSensor):
     def __init__(
         self,
         coordinator: EdulogCoordinator,
-        entry: ConfigEntry,
+        entry: EdulogConfigEntry,
         student_id: str,
         tenant_id: str,
         vehicle_id: str,
@@ -200,7 +200,7 @@ class EdulogVehicleTelemetryHealthSensor(EdulogVehicleDiagnosticSensor):
     def __init__(
         self,
         coordinator: EdulogCoordinator,
-        entry: ConfigEntry,
+        entry: EdulogConfigEntry,
         student_id: str,
         tenant_id: str,
         vehicle_id: str,

@@ -8,8 +8,11 @@ same vehicle, they share one tracker; it lists the associated trips in its
 `trip` and `trips` attributes. Trackers use generic `Vehicle 1`, `Vehicle 2`,
 etc. names and account/student-scoped entity IDs, rather than exposing the
 Edulog vehicle ID in their names or entity IDs. Entity IDs follow the
-`device_tracker.edulog_<account>_<student>_vehicle_<number>` pattern; numbering
-is retained for registered vehicles and new vehicles receive the next number.
+`device_tracker.edulog_<account>_<student>_vehicle_<number>` pattern when a
+tracker is first created. Vehicles keep the number they were registered with,
+new vehicles receive the lowest free number, and the integration never changes
+an entity ID or name you have customized. A vehicle that is no longer assigned
+keeps its entity, history and settings and becomes unavailable.
 Vehicle diagnostic entities expose their `vehicle_id` attribute.
 Tracker attributes include `student_first_name`, `student_last_name`,
 `trip_type`, `pickup_stop_name`, `pickup_time`, `dropoff_stop_name`, and
@@ -27,7 +30,7 @@ Install **Edulog Bus Tracker** through HACS, or copy
 
 To install through HACS before it is listed in the default store, go to
 **HACS > Integrations > menu > Custom repositories**, add
-`https://github.com/chicagoandy/HASSEdulogBusTracker`, and choose **Integration**.
+`https://github.com/chicagoandy/HASS-EdulogBusTracker`, and choose **Integration**.
 
 ## Setup
 
@@ -53,8 +56,13 @@ before that route's first stop through the trip's drop-off time. If trips share
 a vehicle, it is polled once per vehicle while any associated trip is in its
 polling window. Vehicle-location API errors trigger per-vehicle exponential
 backoff, starting at 10 seconds and capped at 5 minutes; a successful request
-resets the backoff. Authentication failures still trigger reauthentication
-immediately.
+resets the backoff. While a vehicle's requests fail, its tracker keeps the last
+known position and its telemetry health sensor reports `stale`. If the student
+or trip schedule endpoints fail, the whole update backs off, starting at 30
+seconds and capped at 5 minutes, and returns to the normal cadence after the
+next successful update. Authentication failures still trigger reauthentication
+immediately. Students in different school districts (Edulog tenants) are
+supported; trip schedules are requested separately for each district.
 The approved student list is fetched at startup and refreshed daily. Trip
 schedules are fetched at startup and refreshed hourly, or sooner if the
 approved student list changes. Thus, student and trip endpoints are not called
@@ -86,16 +94,15 @@ on the first coordinator update due after the displayed time.
 The integration logs warnings when the student API returns no approved
 requests, approved requests are missing required IDs, trip schedule data is
 missing or does not match approved students, or no assigned trips are returned.
-Successful setup, fetch counts, and tracker preparation summaries are logged
-at INFO. Authentication, API, and connection failures are logged at ERROR.
-Polling decisions and vehicle location results are logged at DEBUG; that
+Failed updates are reported by Home Assistant's update coordinator, once when
+updates start failing and once when they recover. Fetch counts, tracker
+preparation summaries, polling decisions and vehicle location results are logged at DEBUG; that
 includes a summary on each coordinator update while debug logging is enabled,
 so use it temporarily when troubleshooting. Individual trip diagnostics show
 the pickup/dropoff values, whether a vehicle is assigned, and the computed
 active state; they are emitted at startup, schedule refresh, or when the
-active state changes. To show INFO and ERROR messages, set the integration
-logger to `info` in Home Assistant's `configuration.yaml`. Use `debug` for
-polling diagnostics:
+active state changes. To see them, set the integration logger to `debug` in
+Home Assistant's `configuration.yaml`:
 
 ```yaml
 logger:
@@ -109,9 +116,9 @@ integration's diagnostic logs use counts and avoid logging student identifiers,
 vehicle identifiers, coordinates, or access tokens; still avoid sharing full
 Home Assistant logs publicly.
 
-If the Edulog access token expires, Home Assistant creates a repair issue
-asking you to reauthenticate the integration. The issue is cleared after a
-successful sign-in.
+If the Edulog access token expires and cannot be refreshed, Home Assistant
+asks you to reauthenticate the integration from **Settings > Devices &
+services**. Sign in with the same Edulog account to restore bus updates.
 
 ## API behavior
 
@@ -140,6 +147,7 @@ custom_components/edulog_bus_tracker/
   manifest.json
   sensor.py
   strings.json
+  translations/en.json
 hacs.json
 LICENSE
 .github/workflows/validate.yml

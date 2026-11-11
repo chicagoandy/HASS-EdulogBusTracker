@@ -3,36 +3,38 @@
     "step": {
       "user": {
         "title": "Connect to Edulog",
-        "description": "Use your Edulog Parent Portal email and password to obtain an access token. Only the access token is saved; the email and password are used only for this sign-in.",
+        "description": "Sign in with your Edulog Parent Portal account. Only the access and refresh tokens are saved; your email and password are used for this sign-in only.",
         "data": {
-          "username": "Email",
+          "email": "Email",
           "password": "Password"
+        },
+        "data_description": {
+          "email": "The email address you use to sign in to the Edulog Parent Portal.",
+          "password": "Your Edulog Parent Portal password. It is not stored."
         }
       },
       "reauth_confirm": {
         "title": "Edulog sign-in expired",
         "description": "Sign in again to replace the expired access token. Your email and password are not saved.",
         "data": {
-          "username": "Email",
+          "email": "Email",
           "password": "Password"
+        },
+        "data_description": {
+          "email": "The email address of the Edulog account that was set up.",
+          "password": "Your Edulog Parent Portal password. It is not stored."
         }
       }
     },
     "error": {
-      "invalid_auth": "The portal rejected these credentials or returned an invalid login response.",
-      "cannot_connect": "Could not connect to the Edulog Parent Portal.",
-      "wrong_account": "These credentials belong to a different Edulog account."
+      "invalid_auth": "Invalid authentication",
+      "cannot_connect": "Failed to connect",
+      "wrong_account": "These credentials belong to a different Edulog account.",
+      "unknown": "Unexpected error"
     },
     "abort": {
-      "already_configured": "This Edulog account is already configured.",
-      "reauth_successful": "Edulog sign-in was successful.",
-      "reauth_entry_not_found": "The Edulog configuration entry could not be found."
-    }
-  },
-  "issues": {
-    "reauthenticate": {
-      "title": "Edulog sign-in required",
-      "description": "The Edulog access token has expired. Reauthenticate the Edulog Bus Tracker integration from Settings > Devices & services to restore bus updates."
+      "already_configured": "Account is already configured",
+      "reauth_successful": "Re-authentication was successful"
     }
   }
 }

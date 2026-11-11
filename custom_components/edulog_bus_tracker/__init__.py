@@ -2,27 +2,23 @@
 
 from __future__ import annotations
 
-import logging
-
-import aiohttp
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant
-from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady
+from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
-from .api import EdulogApi, EdulogHttpError
-from .const import DOMAIN
+from .api import EdulogApi
+from .const import DOMAIN, REAUTH_ISSUE_ID_PREFIX
 from .coordinator import EdulogCoordinator
-
-_LOGGER = logging.getLogger(__name__)
 
 PLATFORMS = [Platform.BINARY_SENSOR, Platform.DEVICE_TRACKER, Platform.SENSOR]
 
+type EdulogConfigEntry = ConfigEntry[EdulogCoordinator]
 
-async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+
+async def async_setup_entry(hass: HomeAssistant, entry: EdulogConfigEntry) -> bool:
     """Set up Edulog from a config entry."""
-    _LOGGER.info("Setting up Edulog Bus Tracker integration")
 
     def update_tokens(access_token: str, refresh_token: str) -> None:
         hass.config_entries.async_update_entry(
@@ -34,6 +30,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             },
         )
 
+    # Earlier releases raised a custom repair issue next to the reauth flow.
+    # Home Assistant's own reauth prompt replaces it, so clear any leftover.
+    ir.async_delete_issue(hass, DOMAIN, f"{REAUTH_ISSUE_ID_PREFIX}_{entry.entry_id}")
+
     api = EdulogApi(
         async_get_clientsession(hass),
         entry.data.get("auth_token"),
@@ -41,37 +41,24 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         refresh_token=entry.data.get("refresh_token"),
         token_update_callback=update_tokens,
     )
-    coordinator = EdulogCoordinator(hass, api, entry.entry_id)
-    try:
-        await coordinator.async_config_entry_first_refresh()
-    except ConfigEntryAuthFailed:
-        raise
-    except EdulogHttpError as err:
-        raise ConfigEntryNotReady("Edulog API is temporarily unavailable") from err
-    except (aiohttp.ClientError, TimeoutError) as err:
-        raise ConfigEntryNotReady("Could not connect to Edulog") from err
-    hass.data.setdefault(DOMAIN, {})[entry.entry_id] = coordinator
+    coordinator = EdulogCoordinator(hass, entry, api)
+    # The coordinator turns API failures into ConfigEntryNotReady and auth
+    # failures into ConfigEntryAuthFailed during the first refresh.
+    await coordinator.async_config_entry_first_refresh()
+    entry.runtime_data = coordinator
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     return True
 
 
-async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+async def async_unload_entry(hass: HomeAssistant, entry: EdulogConfigEntry) -> bool:
     """Unload an Edulog config entry."""
-    if not await hass.config_entries.async_unload_platforms(entry, PLATFORMS):
-        return False
-    hass.data[DOMAIN].pop(entry.entry_id, None)
-    return True
+    return await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
 
 
 async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    """Migrate older config-entry data formats."""
+    """Migrate older config-entry data formats, one version at a time."""
     if entry.version == 1:
-        hass.config_entries.async_update_entry(
-            entry,
-            data={},
-            version=2,
-        )
-        return True
+        hass.config_entries.async_update_entry(entry, data={}, version=2)
     if entry.version == 2:
         hass.config_entries.async_update_entry(
             entry,
@@ -80,13 +67,8 @@ async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             else {},
             version=3,
         )
-        return True
     if entry.version == 3:
         hass.config_entries.async_update_entry(
-            entry,
-            data=dict(entry.data),
-            version=4,
+            entry, data=dict(entry.data), version=4
         )
-        return True
-
-    return False
+    return entry.version == 4

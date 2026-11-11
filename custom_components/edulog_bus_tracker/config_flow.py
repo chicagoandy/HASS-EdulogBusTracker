@@ -2,19 +2,28 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+import logging
 from typing import Any
 
 import aiohttp
 import voluptuous as vol
-from homeassistant import config_entries
-from homeassistant.const import CONF_PASSWORD, CONF_USERNAME
+from homeassistant.config_entries import ConfigFlow, ConfigFlowResult
+from homeassistant.const import CONF_EMAIL, CONF_PASSWORD
 from homeassistant.core import HomeAssistant
-from homeassistant.data_entry_flow import FlowResult
-from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
-from .api import EdulogApi, EdulogAuthError, EdulogHttpError
-from .const import DOMAIN, REAUTH_ISSUE_ID_PREFIX
+from .api import EdulogApi, EdulogApiError, EdulogAuthError, EdulogHttpError
+from .const import DOMAIN
+
+_LOGGER = logging.getLogger(__name__)
+
+CREDENTIALS_SCHEMA = vol.Schema(
+    {
+        vol.Required(CONF_EMAIL): str,
+        vol.Required(CONF_PASSWORD): str,
+    }
+)
 
 
 async def _get_auth_token(
@@ -31,40 +40,50 @@ async def _get_auth_token(
     return api.access_token, api.refresh_token, api.user_id
 
 
-def _login_error(err: Exception) -> str:
-    if isinstance(err, EdulogHttpError):
-        return "invalid_auth" if err.status in (400, 401, 403) else "cannot_connect"
-    if isinstance(err, EdulogAuthError):
-        return "invalid_auth"
-    return "cannot_connect"
+async def _async_try_login(
+    hass: HomeAssistant, user_input: Mapping[str, Any]
+) -> tuple[tuple[str, str, str] | None, str | None]:
+    """Return the tokens and account ID, or the form error key."""
+    try:
+        return (
+            await _get_auth_token(
+                hass, user_input[CONF_EMAIL], user_input[CONF_PASSWORD]
+            ),
+            None,
+        )
+    except EdulogHttpError as err:
+        return None, (
+            "invalid_auth" if err.status in (400, 401, 403) else "cannot_connect"
+        )
+    except EdulogAuthError:
+        return None, "invalid_auth"
+    except (EdulogApiError, aiohttp.ClientError, TimeoutError):
+        return None, "cannot_connect"
+    except Exception:
+        _LOGGER.exception("Unexpected error while signing in to Edulog")
+        return None, "unknown"
 
 
-class EdulogConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
+class EdulogConfigFlow(ConfigFlow, domain=DOMAIN):
     """Handle a config flow for Edulog Bus Tracker."""
 
     VERSION = 4
 
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
-    ) -> FlowResult:
+    ) -> ConfigFlowResult:
         """Exchange transient credentials for an access token."""
         errors: dict[str, str] = {}
         if user_input is not None:
-            try:
-                access_token, refresh_token, user_id = await _get_auth_token(
-                    self.hass,
-                    user_input[CONF_USERNAME],
-                    user_input[CONF_PASSWORD],
-                )
-            except (EdulogAuthError, EdulogHttpError) as err:
-                errors["base"] = _login_error(err)
-            except (aiohttp.ClientError, TimeoutError, ValueError):
-                errors["base"] = "cannot_connect"
+            result, error = await _async_try_login(self.hass, user_input)
+            if result is None:
+                errors["base"] = error or "unknown"
             else:
+                access_token, refresh_token, user_id = result
                 await self.async_set_unique_id(user_id)
                 self._abort_if_unique_id_configured()
                 return self.async_create_entry(
-                    title="Edulog Parent Portal",
+                    title=user_input[CONF_EMAIL],
                     data={
                         "auth_token": access_token,
                         "refresh_token": refresh_token,
@@ -73,70 +92,41 @@ class EdulogConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         return self.async_show_form(
             step_id="user",
-            data_schema=_credentials_schema(),
+            data_schema=CREDENTIALS_SCHEMA,
             errors=errors,
         )
 
     async def async_step_reauth(
-        self, entry_data: dict[str, Any]
-    ) -> FlowResult:
+        self, entry_data: Mapping[str, Any]
+    ) -> ConfigFlowResult:
         """Reauthenticate an expired access token."""
-        self._reauth_entry = self.hass.config_entries.async_get_entry(
-            self.context["entry_id"]
-        )
         return await self.async_step_reauth_confirm()
 
     async def async_step_reauth_confirm(
         self, user_input: dict[str, Any] | None = None
-    ) -> FlowResult:
+    ) -> ConfigFlowResult:
         """Obtain a replacement token without saving credentials."""
-        if self._reauth_entry is None:
-            return self.async_abort(reason="reauth_entry_not_found")
-
         errors: dict[str, str] = {}
         if user_input is not None:
-            try:
-                access_token, refresh_token, user_id = await _get_auth_token(
-                    self.hass,
-                    user_input[CONF_USERNAME],
-                    user_input[CONF_PASSWORD],
-                )
-            except (EdulogAuthError, EdulogHttpError) as err:
-                errors["base"] = _login_error(err)
-            except (aiohttp.ClientError, TimeoutError, ValueError):
-                errors["base"] = "cannot_connect"
+            result, error = await _async_try_login(self.hass, user_input)
+            if result is None:
+                errors["base"] = error or "unknown"
             else:
-                if user_id != self._reauth_entry.unique_id:
+                access_token, refresh_token, user_id = result
+                reauth_entry = self._get_reauth_entry()
+                if user_id != reauth_entry.unique_id:
                     errors["base"] = "wrong_account"
                 else:
-                    self.hass.config_entries.async_update_entry(
-                        self._reauth_entry,
+                    return self.async_update_reload_and_abort(
+                        reauth_entry,
                         data={
                             "auth_token": access_token,
                             "refresh_token": refresh_token,
                         },
                     )
-                    ir.async_delete_issue(
-                        self.hass,
-                        DOMAIN,
-                        f"{REAUTH_ISSUE_ID_PREFIX}_{self._reauth_entry.entry_id}",
-                    )
-                    await self.hass.config_entries.async_reload(
-                        self._reauth_entry.entry_id
-                    )
-                    return self.async_abort(reason="reauth_successful")
 
         return self.async_show_form(
             step_id="reauth_confirm",
-            data_schema=_credentials_schema(),
+            data_schema=CREDENTIALS_SCHEMA,
             errors=errors,
         )
-
-
-def _credentials_schema() -> vol.Schema:
-    return vol.Schema(
-        {
-            vol.Required(CONF_USERNAME): str,
-            vol.Required(CONF_PASSWORD): str,
-        }
-    )
