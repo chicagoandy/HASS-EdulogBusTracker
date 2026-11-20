@@ -12,7 +12,12 @@ from .api import EdulogApi
 from .const import DOMAIN, REAUTH_ISSUE_ID_PREFIX
 from .coordinator import EdulogCoordinator
 
-PLATFORMS = [Platform.BINARY_SENSOR, Platform.DEVICE_TRACKER, Platform.SENSOR]
+PLATFORMS = [
+    Platform.BINARY_SENSOR,
+    Platform.DEVICE_TRACKER,
+    Platform.SELECT,
+    Platform.SENSOR,
+]
 
 type EdulogConfigEntry = ConfigEntry[EdulogCoordinator]
 

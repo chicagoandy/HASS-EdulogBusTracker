@@ -300,6 +300,11 @@ class EdulogApi:
                     "heading": _number(event.get("heading")),
                     "speed": _number(event.get("speed")),
                     "vehicleId": vehicle_id,
+                    # "stale" means the vehicle has stopped reporting and this
+                    # is its last fix; the geofences ignore stale fixes.
+                    "position_status": event.get("positionStatus"),
+                    "age_seconds": _number(event.get("ageSeconds")),
+                    "last_fix_at": event.get("lastFixAt"),
                 }
         return None
 

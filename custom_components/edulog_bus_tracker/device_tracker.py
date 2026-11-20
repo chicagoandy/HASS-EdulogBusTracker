@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from homeassistant.components.device_tracker import SourceType, TrackerEntity
-from homeassistant.const import Platform
+from homeassistant.const import STATE_NOT_HOME, Platform
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.device_registry import DeviceInfo
@@ -132,13 +132,24 @@ class EdulogVehicleTracker(CoordinatorEntity[EdulogCoordinator], TrackerEntity):
         return super().available and self.tracker_id in self.coordinator.data
 
     @property
+    def _hidden(self) -> bool:
+        """Return whether the bus is outside its display fence."""
+        return self._vehicle.get("within_display_fence") is False
+
+    @property
     def _location(self) -> dict[str, Any] | None:
+        """Return the position to show, or None while the bus is hidden."""
         location = self._vehicle.get("location")
-        return location if isinstance(location, dict) else None
+        if self._hidden or not isinstance(location, dict):
+            return None
+        return location
 
     @property
     def latitude(self) -> float | None:
-        """Return the current latitude."""
+        """Return the current latitude.
+
+        Without coordinates, Home Assistant's maps do not draw the tracker.
+        """
         return self._location.get("latitude") if self._location else None
 
     @property
@@ -147,18 +158,20 @@ class EdulogVehicleTracker(CoordinatorEntity[EdulogCoordinator], TrackerEntity):
         return self._location.get("longitude") if self._location else None
 
     @property
+    def location_name(self) -> str | None:
+        """Report "not_home" (Away) while the bus is outside its display fence."""
+        return STATE_NOT_HOME if self._hidden else None
+
+    @property
     def extra_state_attributes(self) -> dict[str, Any]:
         """Expose the trips associated with this vehicle and its details."""
         location = self._location
+        raw_location = self._vehicle.get("location")
         trip_names = self._vehicle.get("trip_names", [])
         attributes = {
             "trip": ", ".join(trip_names) if trip_names else None,
             "trips": self._vehicle.get("trips", []),
-            "vehicle_id": (
-                location.get("vehicleId")
-                if location
-                else self._vehicle.get("vehicle_id")
-            ),
+            "vehicle_id": self._vehicle.get("vehicle_id"),
             "student_first_name": self._vehicle.get("student_first_name"),
             "student_last_name": self._vehicle.get("student_last_name"),
             "trip_type": self._vehicle.get("trip_type"),
@@ -166,6 +179,13 @@ class EdulogVehicleTracker(CoordinatorEntity[EdulogCoordinator], TrackerEntity):
             "pickup_time": self._vehicle.get("pickup_time"),
             "dropoff_stop_name": self._vehicle.get("dropoff_stop_name"),
             "dropoff_time": self._vehicle.get("dropoff_time"),
+            "within_display_fence": self._vehicle.get("within_display_fence"),
+            "within_polling_fence": self._vehicle.get("within_polling_fence"),
+            "position_status": (
+                raw_location.get("position_status")
+                if isinstance(raw_location, dict)
+                else None
+            ),
         }
         if location:
             attributes["heading"] = location.get("heading")

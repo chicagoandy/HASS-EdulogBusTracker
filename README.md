@@ -51,10 +51,12 @@ the interval for every API request. On each check, it evaluates active trip
 windows using the cached trip schedules. At startup, it makes one location
 request for each assigned vehicle to initialize tracker entities, even if the
 trip is not yet in its polling window. After startup, vehicle locations are
-refreshed every 5 seconds only for vehicles tied to a trip from 30 minutes
-before that route's first stop through the trip's drop-off time. If trips share
-a vehicle, it is polled once per vehicle while any associated trip is in its
-polling window. Vehicle-location API errors trigger per-vehicle exponential
+refreshed only for vehicles tied to a trip from 30 minutes before that route's
+first stop through the trip's drop-off time: every 5 seconds while the bus is
+inside the trip's polling geofence, and every 30 seconds outside it (see
+[Geofences](#geofences)). If trips share a vehicle, it is polled once per
+vehicle while any associated trip is in its polling window, at the fast rate
+if it is inside the polling geofence of any of those trips. Vehicle-location API errors trigger per-vehicle exponential
 backoff, starting at 10 seconds and capped at 5 minutes; a successful request
 resets the backoff. While a vehicle's requests fail, its tracker keeps the last
 known position and its telemetry health sensor reports `stale`. If the student
@@ -82,12 +84,47 @@ pickup time is used as the start reference. Trips sharing a vehicle therefore
 share one sensor per student, and it reflects the vehicle's actual polling
 state.
 Each distinct vehicle assigned to a student has one **Location polling
-interval** diagnostic sensor, which always reports 5 seconds, and one **Next
-eligible location poll** timestamp sensor. Their `vehicle_id` attributes
+interval** diagnostic sensor, which reports the current rate (5 or 30 seconds)
+while the vehicle is in a polling window and is unknown otherwise, and one
+**Next eligible location poll** timestamp sensor. Their `vehicle_id` attributes
 identify the vehicle. For a shared vehicle, the timestamp reports the earliest
 next poll across all trips using the vehicle: the upcoming polling-window
 start while inactive, or the next refresh time while active. The request runs
 on the first coordinator update due after the displayed time.
+
+## Geofences
+
+Each trip has two circular geofences centred on one of its stops, using the
+stop coordinates in the trip schedule:
+
+- **Fast polling radius** (default 1 mile): during the trip's polling window,
+  the bus location is refreshed every 5 seconds inside this radius and every
+  30 seconds outside it.
+- **Map display radius** (default 3 miles): the tracker reports the bus
+  position only inside this radius. Outside it, the tracker reports no
+  coordinates, so Home Assistant's maps do not draw it, and its state is
+  `not_home` (shown as Away). It stays available; Unavailable still means the
+  vehicle is no longer assigned. A tracker shared by several trips is shown
+  when the bus is inside the display radius of any of them.
+
+Set both radii with the sliders under **Settings > Devices & services > Edulog
+Bus Tracker > Configure**. Changes apply on the next update, without a reload.
+
+Each trip has a **<trip> fence center** configuration select on the student's
+device, choosing **Pickup** or **Drop-off** as the centre of both fences. Until
+you choose, trips to school use the pickup stop and trips home from school use
+the drop-off stop, so the fences centre on the student's own stop. Its
+`stop_located` attribute shows whether the trip schedule supplied coordinates
+for the chosen stop. If a trip has no stop coordinates, its fences do not
+apply: its bus is polled every 5 seconds during the window and always shown,
+as in earlier releases.
+
+When the live vehicle event marks its fix as `stale` (the bus has stopped
+reporting), the fix counts as outside both fences: the bus is hidden and polled
+at the slower rate. Trackers expose `within_polling_fence`,
+`within_display_fence` (each `null` when the fence does not apply) and
+`position_status` attributes, and each entry in `trips` includes its
+`fence_center` and `fence_center_located`.
 
 ## Troubleshooting logs
 
@@ -145,6 +182,7 @@ custom_components/edulog_bus_tracker/
   coordinator.py
   device_tracker.py
   manifest.json
+  select.py
   sensor.py
   strings.json
   translations/en.json

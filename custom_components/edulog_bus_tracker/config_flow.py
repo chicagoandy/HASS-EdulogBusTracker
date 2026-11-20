@@ -8,13 +8,32 @@ from typing import Any
 
 import aiohttp
 import voluptuous as vol
-from homeassistant.config_entries import ConfigFlow, ConfigFlowResult
+from homeassistant.config_entries import (
+    ConfigEntry,
+    ConfigFlow,
+    ConfigFlowResult,
+    OptionsFlow,
+)
 from homeassistant.const import CONF_EMAIL, CONF_PASSWORD
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
+from homeassistant.helpers.selector import (
+    NumberSelector,
+    NumberSelectorConfig,
+    NumberSelectorMode,
+)
 
 from .api import EdulogApi, EdulogApiError, EdulogAuthError, EdulogHttpError
-from .const import DOMAIN
+from .const import (
+    CONF_DISPLAY_FENCE_RADIUS,
+    CONF_POLLING_FENCE_RADIUS,
+    DEFAULT_DISPLAY_FENCE_RADIUS,
+    DEFAULT_POLLING_FENCE_RADIUS,
+    DOMAIN,
+    FENCE_RADIUS_MAX,
+    FENCE_RADIUS_MIN,
+    FENCE_RADIUS_STEP,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -68,6 +87,12 @@ class EdulogConfigFlow(ConfigFlow, domain=DOMAIN):
     """Handle a config flow for Edulog Bus Tracker."""
 
     VERSION = 4
+
+    @staticmethod
+    @callback
+    def async_get_options_flow(config_entry: ConfigEntry) -> EdulogOptionsFlow:
+        """Return the options flow that sets the geofence radii."""
+        return EdulogOptionsFlow()
 
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
@@ -129,4 +154,48 @@ class EdulogConfigFlow(ConfigFlow, domain=DOMAIN):
             step_id="reauth_confirm",
             data_schema=CREDENTIALS_SCHEMA,
             errors=errors,
+        )
+
+
+_RADIUS_SELECTOR = NumberSelector(
+    NumberSelectorConfig(
+        min=FENCE_RADIUS_MIN,
+        max=FENCE_RADIUS_MAX,
+        step=FENCE_RADIUS_STEP,
+        mode=NumberSelectorMode.SLIDER,
+        unit_of_measurement="mi",
+    )
+)
+
+
+class EdulogOptionsFlow(OptionsFlow):
+    """Configure the polling and map-display geofence radii."""
+
+    async def async_step_init(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Show sliders for both radii; the next update applies them."""
+        options = self.config_entry.options
+        if user_input is not None:
+            # Keep the per-trip fence centres stored alongside the radii.
+            return self.async_create_entry(data={**options, **user_input})
+
+        return self.async_show_form(
+            step_id="init",
+            data_schema=vol.Schema(
+                {
+                    vol.Required(
+                        CONF_POLLING_FENCE_RADIUS,
+                        default=options.get(
+                            CONF_POLLING_FENCE_RADIUS, DEFAULT_POLLING_FENCE_RADIUS
+                        ),
+                    ): _RADIUS_SELECTOR,
+                    vol.Required(
+                        CONF_DISPLAY_FENCE_RADIUS,
+                        default=options.get(
+                            CONF_DISPLAY_FENCE_RADIUS, DEFAULT_DISPLAY_FENCE_RADIUS
+                        ),
+                    ): _RADIUS_SELECTOR,
+                }
+            ),
         )

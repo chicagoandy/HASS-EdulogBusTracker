@@ -16,7 +16,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from . import EdulogConfigEntry
-from .const import DOMAIN, SCAN_INTERVAL
+from .const import DOMAIN
 from .coordinator import EdulogCoordinator
 
 
@@ -120,7 +120,7 @@ class EdulogVehicleDiagnosticSensor(
 
 
 class EdulogVehiclePollingIntervalSensor(EdulogVehicleDiagnosticSensor):
-    """Report the configured location polling interval for a vehicle."""
+    """Report how often a vehicle's location is currently being polled."""
 
     _attr_native_unit_of_measurement = UnitOfTime.SECONDS
     _attr_state_class = SensorStateClass.MEASUREMENT
@@ -144,14 +144,22 @@ class EdulogVehiclePollingIntervalSensor(EdulogVehicleDiagnosticSensor):
         )
 
     @property
-    def available(self) -> bool:
-        """The configured polling cadence is known independently of API state."""
-        return True
+    def native_value(self) -> float | None:
+        """Return the polling interval in seconds, or None when not polling.
 
-    @property
-    def native_value(self) -> float:
-        """Return the configured location polling interval in seconds."""
-        return SCAN_INTERVAL.total_seconds()
+        Inside the polling fence this is the fast rate; outside it, the
+        slower rate. Outside the trip's schedule window nothing is polled.
+        """
+        return next(
+            (
+                trip.get("polling_interval")
+                for trip in self.coordinator.data.values()
+                if trip["tenant_id"] == self.tenant_id
+                and trip["vehicle_id"] == self.vehicle_id
+                and trip.get("polling_interval") is not None
+            ),
+            None,
+        )
 
 
 class EdulogVehicleNextPollSensor(EdulogVehicleDiagnosticSensor):

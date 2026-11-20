@@ -17,15 +17,27 @@ from homeassistant.helpers.update_coordinator import (
     UpdateFailed,
 )
 from homeassistant.util import dt as dt_util
+from homeassistant.util.location import distance as location_distance
 
 from .api import EdulogApi, EdulogApiError, EdulogAuthError
 from .const import (
     API_ERROR_BACKOFF_INITIAL,
     API_ERROR_BACKOFF_MAX,
+    CONF_DISPLAY_FENCE_RADIUS,
+    CONF_FENCE_CENTERS,
+    CONF_POLLING_FENCE_RADIUS,
+    DEFAULT_DISPLAY_FENCE_RADIUS,
+    DEFAULT_FENCE_CENTER,
+    DEFAULT_POLLING_FENCE_RADIUS,
     DOMAIN,
+    FENCE_CENTER_DROPOFF,
+    FENCE_CENTER_OPTIONS,
+    FROM_SCHOOL_TRIP_TYPES,
     LOCATION_POLL_BACKOFF_INITIAL,
     LOCATION_POLL_BACKOFF_MAX,
     LOCATION_POLL_LEAD_TIME,
+    METERS_PER_MILE,
+    OUTSIDE_POLLING_FENCE_INTERVAL,
     SCAN_INTERVAL,
     STUDENT_LIST_REFRESH_INTERVAL,
     TRIP_SCHEDULE_REFRESH_INTERVAL,
@@ -66,6 +78,36 @@ class EdulogCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
         self._unknown_trip_timezones: set[str] = set()
         self._initial_location_refresh_complete = False
         self._api_refresh_failures = 0
+
+    def fence_center(self, trip_key: str, trip_type: str | None = None) -> str:
+        """Return which stop ("pickup" or "dropoff") centres a trip's fences.
+
+        Until the user picks one, use the student's own stop: the pickup on
+        the way to school and the drop-off on the way home.
+        """
+        centers = self.config_entry.options.get(CONF_FENCE_CENTERS) or {}
+        center = centers.get(trip_key)
+        if center in FENCE_CENTER_OPTIONS:
+            return center
+        return _default_fence_center(trip_type)
+
+    def async_set_fence_center(self, trip_key: str, center: str) -> None:
+        """Store a trip's fence centre; the next update applies it."""
+        options = dict(self.config_entry.options)
+        options[CONF_FENCE_CENTERS] = {
+            **(options.get(CONF_FENCE_CENTERS) or {}),
+            trip_key: center,
+        }
+        self.hass.config_entries.async_update_entry(
+            self.config_entry, options=options
+        )
+
+    def _fence_radius_meters(self, option: str, default_miles: float) -> float:
+        """Return a configured fence radius, entered in miles, in metres."""
+        return (
+            float(self.config_entry.options.get(option, default_miles))
+            * METERS_PER_MILE
+        )
 
     async def _async_update_data(self) -> dict[str, dict[str, Any]]:
         """Retrieve approved students, their trips, and latest bus positions."""
@@ -300,7 +342,23 @@ class EdulogCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
                     if vehicle_id and not polling_active
                     else None
                 )
-                trip_details = {"name": trip_name, **_trip_attributes(trip)}
+                trip_key = f"{student_id}_{tenant_id}_{trip_id}"
+                fence_center = self.fence_center(
+                    trip_key, _string(_field(trip, "type"))
+                )
+                fence_coordinates = _stop_coordinates(trip, fence_center)
+                fence_trip = {
+                    "key": trip_key,
+                    "name": trip_name,
+                    "center": fence_coordinates,
+                    "active": polling_active,
+                }
+                trip_details = {
+                    "name": trip_name,
+                    **_trip_attributes(trip),
+                    "fence_center": fence_center,
+                    "fence_center_located": fence_coordinates is not None,
+                }
                 existing_tracker = trackers.get(tracker_id)
                 if existing_tracker is None:
                     trackers[tracker_id] = {
@@ -308,6 +366,7 @@ class EdulogCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
                         "name": approved_students[student_id]["name"],
                         "trip_names": [trip_name],
                         "trips": [trip_details],
+                        "fence_trips": [fence_trip],
                         "tenant_id": tenant_id,
                         "vehicle_id": vehicle_id,
                         "location": None,
@@ -327,6 +386,7 @@ class EdulogCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
                 else:
                     existing_tracker["trip_names"].append(trip_name)
                     existing_tracker["trips"].append(trip_details)
+                    existing_tracker["fence_trips"].append(fence_trip)
                     existing_tracker["polling_active"] |= polling_active
                     if next_poll_start is not None:
                         current_next_poll = existing_tracker["next_location_poll"]
@@ -344,7 +404,8 @@ class EdulogCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
                     _LOGGER.debug(
                         "Trip polling evaluation for student request %d, trip %d: "
                         "vehicle_assigned=%s, first_route_stop=%r, pickup=%r, "
-                        "dropoff=%r, active=%s",
+                        "dropoff=%r, active=%s, fence_center=%s, "
+                        "fence_center_located=%s",
                         index + 1,
                         trip_index + 1,
                         bool(vehicle_id),
@@ -352,6 +413,8 @@ class EdulogCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
                         pickup_time,
                         dropoff_time,
                         polling_active,
+                        fence_center,
+                        fence_coordinates is not None,
                     )
                 self._last_trip_polling_status[polling_status_key] = polling_active
             if not valid_trip_count:
@@ -424,8 +487,42 @@ class EdulogCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
                     )
                     return None, err
 
+        polling_radius = self._fence_radius_meters(
+            CONF_POLLING_FENCE_RADIUS, DEFAULT_POLLING_FENCE_RADIUS
+        )
+        display_radius = self._fence_radius_meters(
+            CONF_DISPLAY_FENCE_RADIUS, DEFAULT_DISPLAY_FENCE_RADIUS
+        )
+
+        def active_fence_centers(
+            vehicle: tuple[str, str],
+        ) -> list[tuple[float, float]] | None:
+            """Return the fence centres of the vehicle's active trips.
+
+            None means an active trip has no stop coordinates, so no polling
+            fence applies and the vehicle is polled at the fast rate.
+            """
+            centers: list[tuple[float, float]] = []
+            for tracker_id in requests_by_vehicle[vehicle]:
+                for fence_trip in trackers[tracker_id]["fence_trips"]:
+                    if not fence_trip["active"]:
+                        continue
+                    if fence_trip["center"] is None:
+                        return None
+                    centers.append(fence_trip["center"])
+            return centers
+
+        def polling_interval(vehicle: tuple[str, str]) -> timedelta:
+            """Poll fast inside the polling fence and slowly outside it."""
+            centers = active_fence_centers(vehicle)
+            if centers is None or _within_fence(
+                self._vehicle_locations.get(vehicle), centers, polling_radius
+            ):
+                return SCAN_INTERVAL
+            return OUTSIDE_POLLING_FENCE_INTERVAL
+
         vehicle_intervals = {
-            vehicle: SCAN_INTERVAL
+            vehicle: polling_interval(vehicle)
             for vehicle, tracker_ids in requests_by_vehicle.items()
             if any(
                 trackers[tracker_id]["polling_active"]
@@ -450,11 +547,15 @@ class EdulogCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
             )
         ]
         _LOGGER.debug(
-            "Polling evaluation: %d trips, %d active trip(s), %d active vehicle(s); "
-            "%d location request(s) due",
+            "Polling evaluation: %d trips, %d active trip(s), %d active vehicle(s) "
+            "(%d at the fast rate); %d location request(s) due",
             assigned_trip_count,
             active_trip_count,
             len(vehicle_intervals),
+            sum(
+                interval == SCAN_INTERVAL
+                for interval in vehicle_intervals.values()
+            ),
             len(vehicles_to_refresh),
         )
         vehicle_results = await asyncio.gather(
@@ -490,9 +591,23 @@ class EdulogCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
                 len(vehicles_to_refresh),
             )
 
+        # Re-evaluate the polling fence against the positions just received,
+        # so the next poll uses the rate for where the bus is now.
+        vehicle_intervals = {
+            vehicle: polling_interval(vehicle) for vehicle in vehicle_intervals
+        }
+
         for vehicle, tracker_ids in requests_by_vehicle.items():
             location = self._vehicle_locations.get(vehicle)
             interval = vehicle_intervals.get(vehicle)
+            centers = (
+                active_fence_centers(vehicle) if interval is not None else None
+            )
+            within_polling_fence = (
+                None
+                if centers is None
+                else _within_fence(location, centers, polling_radius)
+            )
             last_refresh = self._last_vehicle_refresh.get(vehicle)
             retry_after = self._vehicle_retry_after.get(vehicle)
             if retry_after is not None:
@@ -502,8 +617,23 @@ class EdulogCoordinator(DataUpdateCoordinator[dict[str, dict[str, Any]]]):
             else:
                 next_location_poll = None
             for tracker_id in tracker_ids:
-                trackers[tracker_id]["location"] = location
-                trackers[tracker_id]["telemetry_health"] = (
+                tracker = trackers[tracker_id]
+                tracker["location"] = location
+                tracker["polling_interval"] = (
+                    interval.total_seconds() if interval is not None else None
+                )
+                tracker["within_polling_fence"] = within_polling_fence
+                # The display fence uses all of the tracker's trips, active or
+                # not. If any trip has no stop coordinates, it does not apply.
+                display_centers = [
+                    fence_trip["center"] for fence_trip in tracker["fence_trips"]
+                ]
+                tracker["within_display_fence"] = (
+                    None
+                    if None in display_centers
+                    else _within_fence(location, display_centers, display_radius)
+                )
+                tracker["telemetry_health"] = (
                     self._vehicle_telemetry_health.get(vehicle, "unknown")
                 )
                 if next_location_poll is not None:
@@ -530,6 +660,65 @@ def _field(record: Mapping[str, Any], name: str) -> Any:
         (value for key, value in record.items() if key.casefold() == normalized_name),
         None,
     )
+
+
+def _default_fence_center(trip_type: str | None) -> str:
+    """Centre on the student's own stop: drop-off for trips home from school."""
+    if trip_type and trip_type.strip().casefold() in FROM_SCHOOL_TRIP_TYPES:
+        return FENCE_CENTER_DROPOFF
+    return DEFAULT_FENCE_CENTER
+
+
+def _stop_coordinates(
+    trip: Mapping[str, Any], stop: str
+) -> tuple[float, float] | None:
+    """Return the (latitude, longitude) of a trip's pickup or drop-off stop."""
+    record = _field(trip, stop)
+    if not isinstance(record, Mapping):
+        return None
+    latitude = _coordinate(_field(record, "latitude"))
+    longitude = _coordinate(_field(record, "longitude"))
+    if (
+        latitude is None
+        or longitude is None
+        or not -90 <= latitude <= 90
+        or not -180 <= longitude <= 180
+    ):
+        return None
+    return latitude, longitude
+
+
+def _coordinate(value: Any) -> float | None:
+    if isinstance(value, bool):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _location_is_fresh(location: Mapping[str, Any] | None) -> bool:
+    """Return whether a vehicle fix is current; "stale" fixes are old."""
+    return location is not None and (
+        str(location.get("position_status") or "").strip().casefold() != "stale"
+    )
+
+
+def _within_fence(
+    location: Mapping[str, Any] | None,
+    centers: list[tuple[float, float]],
+    radius_meters: float,
+) -> bool:
+    """Return whether a fresh vehicle fix is within the radius of any centre."""
+    if location is None or not _location_is_fresh(location):
+        return False
+    for latitude, longitude in centers:
+        meters = location_distance(
+            location["latitude"], location["longitude"], latitude, longitude
+        )
+        if meters is not None and meters <= radius_meters:
+            return True
+    return False
 
 
 def _trip_attributes(trip: Mapping[str, Any]) -> dict[str, Any]:

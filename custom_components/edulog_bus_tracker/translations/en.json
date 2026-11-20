@@ -36,5 +36,31 @@
       "already_configured": "Account is already configured",
       "reauth_successful": "Re-authentication was successful"
     }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Geofences",
+        "description": "Each trip's geofences are centred on its pickup or drop-off stop; choose which with the trip's fence center setting on the student's device.",
+        "data": {
+          "polling_fence_radius": "Fast polling radius",
+          "display_fence_radius": "Map display radius"
+        },
+        "data_description": {
+          "polling_fence_radius": "During a trip, the bus location is refreshed every 5 seconds inside this distance of the stop and every 30 seconds outside it.",
+          "display_fence_radius": "The bus is shown on the map only inside this distance of the stop. Outside it, the tracker reports Away."
+        }
+      }
+    }
+  },
+  "entity": {
+    "select": {
+      "fence_center": {
+        "state": {
+          "pickup": "Pickup",
+          "dropoff": "Drop-off"
+        }
+      }
+    }
   }
 }
